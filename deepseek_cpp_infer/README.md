@@ -19,8 +19,12 @@ cmake --build build -j
 ## Current Status
 
 - Loads `config.json`.
+- Reads `model.safetensors.index.json` (expected shard list + tensor keys).
 - Discovers `*.safetensors` shards.
 - Parses safetensors headers without loading full tensor payloads.
-- Verifies basic invariants (e.g. at least one shard; header parse succeeds).
+- `verify` checks required DeepSeek-V2-Lite(-Chat) tensor key structure via index.
+- `strict` prints dense/MoE layer map (from index).
 
-Next: tokenizer loading + minimal sampling loop + real weight mapping.
+Architecture: see `ARCHITECTURE.md`.
+
+Next: weight mmap/lazy loading + tokenizer decode/encode + first end-to-end decode loop.

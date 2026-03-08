@@ -30,9 +30,10 @@ void print_config(const ds::hf::DeepSeekConfig& cfg) {
 
 [[noreturn]] void usage() {
   throw std::runtime_error(
-      "usage: ds_chat <model_dir> [info|verify]\n"
-      "  info:   print config + shard list\n"
-      "  verify: parse safetensors headers (default)\n");
+      "usage: ds_chat <model_dir> [info|verify|strict]\n"
+      "  info:   print config + index + shard list\n"
+      "  verify: validate required tensor keys via index; if shards exist, parse headers (default)\n"
+      "  strict: verify + print dense/MoE layer map inferred from index\n");
 }
 
 } // namespace
@@ -83,13 +84,16 @@ int main(int argc, char** argv) {
       return 0;
     }
 
-    if (cmd == "verify") {
+    if (cmd == "verify" || cmd == "strict") {
       print_config(cfg);
       if (!has_tokenizer) {
         std::cout << "warn: tokenizer.json missing: " << tok_json << "\n";
       }
 
       // If we have an index, we can validate required tensor keys before shards are fully downloaded.
+      std::vector<bool> layer_is_moe;
+      layer_is_moe.resize(static_cast<std::size_t>(cfg.num_hidden_layers), false);
+
       if (!index_tensor_names.empty()) {
         std::unordered_set<std::string> keys;
         keys.reserve(index_tensor_names.size());
@@ -113,7 +117,7 @@ int main(int argc, char** argv) {
         require_key("model.embed_tokens.weight");
         require_key("model.norm.weight");
 
-        // Per-layer weights. We keep checks minimal but structurally meaningful.
+        // Per-layer weights. Checks are structural and match the DeepSeek-V2-Lite-Chat HF naming.
         for (int i = 0; i < cfg.num_hidden_layers; ++i) {
           const auto base = "model.layers." + std::to_string(i) + ".";
 
@@ -128,6 +132,7 @@ int main(int argc, char** argv) {
 
           const auto mlp = base + "mlp.";
           const bool is_moe = any_with_prefix(mlp + "experts.");
+          layer_is_moe[static_cast<std::size_t>(i)] = is_moe;
 
           if (!is_moe) {
             require_key(mlp + "gate_proj.weight");
@@ -154,6 +159,17 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "Index OK (required tensor keys present). keys=" << index_tensor_names.size() << "\n";
+      }
+
+      if (cmd == "strict" && !index_tensor_names.empty()) {
+        std::cout << "Layer map (from index):\n";
+        int moe = 0;
+        for (int i = 0; i < cfg.num_hidden_layers; ++i) {
+          const bool is_moe = layer_is_moe[static_cast<std::size_t>(i)];
+          if (is_moe) ++moe;
+          std::cout << "  layer " << i << ": " << (is_moe ? "MoE" : "dense") << "\n";
+        }
+        std::cout << "MoE layers: " << moe << "/" << cfg.num_hidden_layers << "\n";
       }
 
       if (shards.empty()) {
