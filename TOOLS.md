@@ -2,38 +2,35 @@
 
 Skills define _how_ tools work. This file is for _your_ specifics — the stuff that's unique to your setup.
 
-## What Goes Here
+## Project Commands (DeepSeek C++ Infer)
 
-Things like:
+Build:
 
-- Camera names and locations
-- SSH hosts and aliases
-- Preferred voices for TTS
-- Speaker/room names
-- Device nicknames
-- Anything environment-specific
-
-## Examples
-
-```markdown
-### Cameras
-
-- living-room → Main area, 180° wide angle
-- front-door → Entrance, motion-triggered
-
-### SSH
-
-- home-server → 192.168.1.100, user: admin
-
-### TTS
-
-- Preferred voice: "Nova" (warm, slightly British)
-- Default speaker: Kitchen HomePod
+```bash
+cd /home/nagisa/.openclaw/workspace/deepseek_cpp_infer
+cmake -S . -B build
+cmake --build build -j
 ```
 
-## Why Separate?
+Run:
 
-Skills are shared. Your setup is yours. Keeping them apart means you can update skills without losing your notes, and share skills without leaking your infrastructure.
+```bash
+./build/ds_chat <model_dir> info
+./build/ds_chat <model_dir> verify
+```
+
+## Pitfalls / Notes
+
+- `rg` (ripgrep) is not installed in this environment; use `grep -RIn` and `find` for fast searches.
+- Avoid committing build outputs; `.gitignore` covers `**/build/**`.
+- For large `*.safetensors` shards, prefer header-only parsing or mmap/lazy-loading (do not slurp multi-GB files into RAM by default).
+
+## OpenClaw Service
+
+```bash
+openclaw status
+openclaw gateway status
+```
 
 ---
 

@@ -207,6 +207,14 @@ Think of it like a human reviewing their journal and updating their mental model
 
 The goal: Be helpful without being annoying. Check in a few times a day, do useful background work, but respect quiet time.
 
+## Project Constraints (DeepSeek-V2-Lite Infer)
+
+- Primary project: `deepseek_cpp_infer/` (C++17 + CMake). Goal is a runnable DeepSeek-V2-Lite inference framework.
+- Bootstrap-first: prefer wiring + verifiers (config/shards/headers) before full numerical kernels.
+- Large files: do not read full `*.safetensors` shards into memory unless explicitly needed; prefer header-only parse / mmap / lazy load.
+- Build outputs: never commit `**/build/**`; keep `.gitignore` updated.
+- Milestones: keep changes small and runnable; commit per working checkpoint.
+
 ## Make It Yours
 
 This is a starting point. Add your own conventions, style, and rules as you figure out what works.

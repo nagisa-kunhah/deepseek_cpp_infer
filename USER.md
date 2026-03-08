@@ -5,12 +5,16 @@ _Learn about the person you're helping. Update this as you go._
 - **Name:**
 - **What to call them:**
 - **Pronouns:** _(optional)_
-- **Timezone:**
+- **Timezone:** Asia/Shanghai
 - **Notes:**
+  - Prefers Chinese responses.
+  - Wants visibility into progress (announce at checkpoints; answer "done?" clearly).
+  - Current priority: build the inference framework skeleton first, then make DeepSeek-V2-Lite run end-to-end.
+  - Prefers project context to be written to repo files (README/TODO/MEMORY) so resets are recoverable.
 
 ## Context
 
-_(What do they care about? What projects are they working on? What annoys them? What makes them laugh? Build this over time.)_
+- Active project: DeepSeek-V2-Lite inference framework under `deepseek_cpp_infer/`.
 
 ---
 
