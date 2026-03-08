@@ -14,6 +14,7 @@
 
 - [ ] Tokenizer loader (prefer `tokenizer.json`; fallback to BPE vocab files)
 - [x] Runtime tensor abstraction (CPU activations as f32) + fp16/bf16 decode helpers
+- [x] Streaming weight access helpers (embedding lookup, lm_head greedy scan)
 - [ ] Implement core ops needed by DeepSeek-V2-Lite block (RMSNorm, RoPE, attention, MLP/MoE routing)
   - [x] CPU baseline: linear + RMSNorm (f32 activations)
   - [x] Decode weights (BF16/F16/F32) to f32 (bootstrap path)

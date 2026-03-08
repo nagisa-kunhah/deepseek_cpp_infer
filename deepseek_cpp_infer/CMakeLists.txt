@@ -36,6 +36,7 @@ add_executable(ds_chat
   src/hf/weights_index.cpp
   src/hf/model_loader.cpp
   src/hf/decode.cpp
+  src/hf/weight_ops.cpp
 )
 
 target_include_directories(ds_chat PRIVATE include)
