@@ -1,0 +1,6 @@
+# Build artifacts
+**/build/
+**/cmake-build-*/
+
+# Local tooling
+.DS_Store

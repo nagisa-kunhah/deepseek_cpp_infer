@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ds-infer"
+version = "0.0.1"
+description = "A tiny Triton-based inference playground for DeepSeek-V2-Lite-style MoE"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.1",
+  "triton>=2.1",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
