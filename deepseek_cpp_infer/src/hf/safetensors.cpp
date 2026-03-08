@@ -27,6 +27,18 @@ std::uint64_t read_u64_le(const std::uint8_t* p) {
 
 } // namespace
 
+std::size_t dtype_nbytes(DType t) {
+  switch (t) {
+    case DType::F16: return 2;
+    case DType::BF16: return 2;
+    case DType::F32: return 4;
+    case DType::I32: return 4;
+    case DType::I64: return 8;
+    case DType::U8: return 1;
+    default: return 0;
+  }
+}
+
 SafeTensorsHeader load_safetensors_header(const std::string& path) {
   SafeTensorsHeader h;
   h.path = path;
@@ -40,6 +52,9 @@ SafeTensorsHeader load_safetensors_header(const std::string& path) {
   if (f.gcount() != 8) throw std::runtime_error("safetensors: file too small: " + path);
 
   const auto header_len = read_u64_le(lenbuf);
+  h.header_len = header_len;
+  h.data_offset = 8ull + header_len;
+
   std::string header_json;
   header_json.resize(static_cast<std::size_t>(header_len));
   f.read(header_json.data(), static_cast<std::streamsize>(header_len));

@@ -1,4 +1,5 @@
 #include "ds/hf/config.h"
+#include "ds/hf/model_loader.h"
 #include "ds/hf/safetensors.h"
 #include "ds/hf/weights_index.h"
 #include "ds/util/path.h"
@@ -30,10 +31,11 @@ void print_config(const ds::hf::DeepSeekConfig& cfg) {
 
 [[noreturn]] void usage() {
   throw std::runtime_error(
-      "usage: ds_chat <model_dir> [info|verify|strict]\n"
+      "usage: ds_chat <model_dir> [info|verify|strict|load]\n"
       "  info:   print config + index + shard list\n"
       "  verify: validate required tensor keys via index; if shards exist, parse headers (default)\n"
-      "  strict: verify + print dense/MoE layer map inferred from index\n");
+      "  strict: verify + print dense/MoE layer map inferred from index\n"
+      "  load:   mmap shards and build tensor views (no inference yet)\n");
 }
 
 } // namespace
@@ -81,6 +83,18 @@ int main(int argc, char** argv) {
 
       std::cout << "Found " << shards.size() << " shard(s) on disk.\n";
       for (const auto& s : shards) std::cout << "  " << s << "\n";
+      return 0;
+    }
+
+    if (cmd == "load") {
+      const auto m = ds::hf::load_model_dir(model_dir);
+      std::cout << "Loaded model views: tensors=" << m.tensors.size() << " shards=" << m.shards.size() << "\n";
+
+      auto it = m.tensors.find("model.embed_tokens.weight");
+      if (it != m.tensors.end()) {
+        std::cout << "Sample tensor: " << it->second.name << " bytes=" << it->second.nbytes << " shard=" << it->second.shard_path << "\n";
+      }
+      std::cout << "OK\n";
       return 0;
     }
 

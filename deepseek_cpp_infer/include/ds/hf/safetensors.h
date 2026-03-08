@@ -28,14 +28,18 @@ struct TensorView {
 struct TensorMeta {
   DType dtype = DType::UNKNOWN;
   std::vector<std::int64_t> shape;
-  std::uint64_t data_start = 0;
-  std::uint64_t data_end = 0;
+  std::uint64_t data_start = 0; // offset into the data section
+  std::uint64_t data_end = 0;   // offset into the data section
 };
 
 struct SafeTensorsHeader {
   std::string path;
+  std::uint64_t header_len = 0;
+  std::uint64_t data_offset = 0; // absolute file offset where tensor data begins
   std::unordered_map<std::string, TensorMeta> tensors;
 };
+
+std::size_t dtype_nbytes(DType t);
 
 struct SafeTensorsFile {
   std::string path;

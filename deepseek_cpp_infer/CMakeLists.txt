@@ -21,9 +21,11 @@ add_executable(ds_chat
   src/util/fs.cpp
   src/util/json.cpp
   src/util/path.cpp
+  src/util/mmap.cpp
   src/hf/config.cpp
   src/hf/safetensors.cpp
   src/hf/weights_index.cpp
+  src/hf/model_loader.cpp
 )
 
 target_include_directories(ds_chat PRIVATE include)
