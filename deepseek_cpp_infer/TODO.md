@@ -19,6 +19,7 @@
   - [x] Decode weights (BF16/F16/F32) to f32 (bootstrap path)
 - [ ] KV cache + incremental decode
 - [ ] Sampling (temperature/top-k/top-p, repetition penalty)
+  - [x] temperature/top-k/top-p (bootstrap sampler)
 
 ## Milestone 2 (performance)
 

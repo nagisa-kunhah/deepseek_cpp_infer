@@ -25,6 +25,8 @@ add_executable(ds_chat
   src/core/dtype.cpp
   src/core/tensor.cpp
   src/core/ops.cpp
+  src/core/math.cpp
+  src/core/sampler.cpp
   src/hf/config.cpp
   src/hf/safetensors.cpp
   src/hf/weights_index.cpp
