@@ -3,9 +3,12 @@
 ## Milestone 0 (bootstrap)
 
 - [x] Parse `config.json` (HF-style)
-- [ ] Add model-dir discovery utilities (config/tokenizer/shards)
-- [ ] Parse safetensors headers without loading full weights
-- [ ] `verify` command: print shard list, tensor counts, basic sanity checks
+- [x] Model-dir discovery + presence checks (`config.json`, `tokenizer.json`, index, shards)
+- [x] Parse safetensors headers without loading full weights (header-only)
+- [x] `verify`: validate required DeepSeek-V2-Lite tensor key structure via `model.safetensors.index.json`
+- [x] `strict`: print dense/MoE layer map inferred from the index
+- [ ] `verify`: when shards exist, parse each shard header and print tensor counts
+- [ ] `load`: mmap shards and build tensor views (end-to-end load success depends on shards downloaded)
 
 ## Milestone 1 (runnable)
 
@@ -17,6 +20,6 @@
 
 ## Milestone 2 (performance)
 
-- [ ] Mmap weights / lazy load
+- [x] Mmap weights (read-only) / lazy view layer (no tensor materialization)
 - [ ] Threading, batching
 - [ ] CUDA kernels (optional)
