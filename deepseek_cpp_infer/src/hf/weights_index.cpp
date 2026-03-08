@@ -23,11 +23,16 @@ SafetensorsIndex load_safetensors_index(const std::string& path) {
   std::unordered_set<std::string> uniq;
   uniq.reserve(wm->as_object().v.size());
 
+  idx.tensor_names.reserve(wm->as_object().v.size());
   for (const auto& kv : wm->as_object().v) {
+    idx.tensor_names.push_back(kv.first);
+
     const auto& v = *kv.second;
     if (!v.is_string()) continue;
     uniq.emplace(v.as_string());
   }
+
+  std::sort(idx.tensor_names.begin(), idx.tensor_names.end());
 
   idx.shard_filenames.assign(uniq.begin(), uniq.end());
   std::sort(idx.shard_filenames.begin(), idx.shard_filenames.end());

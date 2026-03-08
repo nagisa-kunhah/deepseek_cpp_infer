@@ -6,8 +6,13 @@
 #include <algorithm>
 #include <iostream>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace {
+
+bool has_prefix(const std::string& s, const std::string& p) {
+  return s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
+}
 
 void print_config(const ds::hf::DeepSeekConfig& cfg) {
   std::cout << "Loaded config:\n";
@@ -56,8 +61,11 @@ int main(int argc, char** argv) {
     const bool has_index = ds::util::file_exists(idx_path);
 
     std::vector<std::string> expected_shards;
+    std::vector<std::string> index_tensor_names;
     if (has_index) {
-      expected_shards = ds::hf::load_safetensors_index(idx_path).shard_filenames;
+      const auto idx = ds::hf::load_safetensors_index(idx_path);
+      expected_shards = idx.shard_filenames;
+      index_tensor_names = idx.tensor_names;
     }
 
     if (cmd == "info") {
@@ -79,6 +87,73 @@ int main(int argc, char** argv) {
       print_config(cfg);
       if (!has_tokenizer) {
         std::cout << "warn: tokenizer.json missing: " << tok_json << "\n";
+      }
+
+      // If we have an index, we can validate required tensor keys before shards are fully downloaded.
+      if (!index_tensor_names.empty()) {
+        std::unordered_set<std::string> keys;
+        keys.reserve(index_tensor_names.size());
+        for (const auto& k : index_tensor_names) keys.emplace(k);
+
+        auto require_key = [&](const std::string& k) {
+          if (keys.find(k) == keys.end()) {
+            throw std::runtime_error("missing tensor in index: " + k);
+          }
+        };
+
+        auto any_with_prefix = [&](const std::string& p) {
+          for (const auto& k : index_tensor_names) {
+            if (has_prefix(k, p)) return true;
+          }
+          return false;
+        };
+
+        // Global weights.
+        require_key("lm_head.weight");
+        require_key("model.embed_tokens.weight");
+        require_key("model.norm.weight");
+
+        // Per-layer weights. We keep checks minimal but structurally meaningful.
+        for (int i = 0; i < cfg.num_hidden_layers; ++i) {
+          const auto base = "model.layers." + std::to_string(i) + ".";
+
+          require_key(base + "input_layernorm.weight");
+          require_key(base + "post_attention_layernorm.weight");
+
+          require_key(base + "self_attn.q_proj.weight");
+          require_key(base + "self_attn.o_proj.weight");
+          require_key(base + "self_attn.kv_a_layernorm.weight");
+          require_key(base + "self_attn.kv_a_proj_with_mqa.weight");
+          require_key(base + "self_attn.kv_b_proj.weight");
+
+          const auto mlp = base + "mlp.";
+          const bool is_moe = any_with_prefix(mlp + "experts.");
+
+          if (!is_moe) {
+            require_key(mlp + "gate_proj.weight");
+            require_key(mlp + "up_proj.weight");
+            require_key(mlp + "down_proj.weight");
+          } else {
+            require_key(mlp + "gate.weight");
+            require_key(mlp + "shared_experts.gate_proj.weight");
+            require_key(mlp + "shared_experts.up_proj.weight");
+            require_key(mlp + "shared_experts.down_proj.weight");
+
+            // Check at least one expert; if config exposes n_experts, also check the last one.
+            require_key(mlp + "experts.0.gate_proj.weight");
+            require_key(mlp + "experts.0.up_proj.weight");
+            require_key(mlp + "experts.0.down_proj.weight");
+
+            if (cfg.n_experts > 1) {
+              const auto last = std::to_string(cfg.n_experts - 1);
+              require_key(mlp + "experts." + last + ".gate_proj.weight");
+              require_key(mlp + "experts." + last + ".up_proj.weight");
+              require_key(mlp + "experts." + last + ".down_proj.weight");
+            }
+          }
+        }
+
+        std::cout << "Index OK (required tensor keys present). keys=" << index_tensor_names.size() << "\n";
       }
 
       if (shards.empty()) {
