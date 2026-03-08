@@ -27,6 +27,9 @@ add_executable(ds_chat
   src/core/ops.cpp
   src/core/math.cpp
   src/core/sampler.cpp
+  src/core/rope.cpp
+  src/core/kv_cache.cpp
+  src/core/attention.cpp
   src/hf/config.cpp
   src/hf/safetensors.cpp
   src/hf/weights_index.cpp
