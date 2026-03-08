@@ -24,10 +24,12 @@ add_executable(ds_chat
   src/util/mmap.cpp
   src/core/dtype.cpp
   src/core/tensor.cpp
+  src/core/ops.cpp
   src/hf/config.cpp
   src/hf/safetensors.cpp
   src/hf/weights_index.cpp
   src/hf/model_loader.cpp
+  src/hf/decode.cpp
 )
 
 target_include_directories(ds_chat PRIVATE include)
