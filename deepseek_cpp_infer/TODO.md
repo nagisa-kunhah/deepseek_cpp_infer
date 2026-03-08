@@ -13,7 +13,7 @@
 ## Milestone 1 (runnable)
 
 - [ ] Tokenizer loader (prefer `tokenizer.json`; fallback to BPE vocab files)
-- [ ] Runtime tensor storage abstraction (CPU first; CUDA optional)
+- [x] Runtime tensor abstraction (CPU activations as f32) + fp16/bf16 decode helpers
 - [ ] Implement core ops needed by DeepSeek-V2-Lite block (RMSNorm, RoPE, attention, MLP/MoE routing)
 - [ ] KV cache + incremental decode
 - [ ] Sampling (temperature/top-k/top-p, repetition penalty)

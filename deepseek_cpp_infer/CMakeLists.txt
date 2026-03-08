@@ -22,6 +22,8 @@ add_executable(ds_chat
   src/util/json.cpp
   src/util/path.cpp
   src/util/mmap.cpp
+  src/core/dtype.cpp
+  src/core/tensor.cpp
   src/hf/config.cpp
   src/hf/safetensors.cpp
   src/hf/weights_index.cpp
