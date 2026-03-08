@@ -30,6 +30,7 @@ add_executable(ds_chat
   src/core/rope.cpp
   src/core/kv_cache.cpp
   src/core/attention.cpp
+  src/core/mha.cpp
   src/hf/config.cpp
   src/hf/safetensors.cpp
   src/hf/weights_index.cpp

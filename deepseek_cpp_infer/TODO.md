@@ -17,7 +17,7 @@
 - [ ] Implement core ops needed by DeepSeek-V2-Lite block (RMSNorm, RoPE, attention, MLP/MoE routing)
   - [x] CPU baseline: linear + RMSNorm (f32 activations)
   - [x] Decode weights (BF16/F16/F32) to f32 (bootstrap path)
-  - [x] CPU baseline: RoPE + naive single-head attention + KV cache structs
+  - [x] CPU baseline: RoPE + naive attention (single-head + multi-head) + KV cache structs
 - [ ] KV cache + incremental decode
 - [ ] Sampling (temperature/top-k/top-p, repetition penalty)
   - [x] temperature/top-k/top-p (bootstrap sampler)
