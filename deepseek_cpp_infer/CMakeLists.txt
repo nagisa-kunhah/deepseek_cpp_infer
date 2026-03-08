@@ -23,6 +23,7 @@ add_executable(ds_chat
   src/util/path.cpp
   src/hf/config.cpp
   src/hf/safetensors.cpp
+  src/hf/weights_index.cpp
 )
 
 target_include_directories(ds_chat PRIVATE include)

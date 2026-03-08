@@ -1,5 +1,6 @@
 #include "ds/hf/config.h"
 #include "ds/hf/safetensors.h"
+#include "ds/hf/weights_index.h"
 #include "ds/util/path.h"
 
 #include <algorithm>
@@ -48,16 +49,47 @@ int main(int argc, char** argv) {
     auto shards = ds::util::list_files_with_suffix(model_dir, ".safetensors");
     std::sort(shards.begin(), shards.end());
 
+    const std::string tok_json = model_dir + "/tokenizer.json";
+    const bool has_tokenizer = ds::util::file_exists(tok_json);
+
+    const std::string idx_path = model_dir + "/model.safetensors.index.json";
+    const bool has_index = ds::util::file_exists(idx_path);
+
+    std::vector<std::string> expected_shards;
+    if (has_index) {
+      expected_shards = ds::hf::load_safetensors_index(idx_path).shard_filenames;
+    }
+
     if (cmd == "info") {
       print_config(cfg);
-      std::cout << "Found " << shards.size() << " safetensors shard(s).\n";
+      std::cout << "Tokenizer: " << (has_tokenizer ? "OK" : "MISSING") << " (" << tok_json << ")\n";
+      std::cout << "Index: " << (has_index ? "OK" : "(none)") << " (" << idx_path << ")\n";
+
+      if (!expected_shards.empty()) {
+        std::cout << "Index expects " << expected_shards.size() << " shard(s):\n";
+        for (const auto& s : expected_shards) std::cout << "  " << s << "\n";
+      }
+
+      std::cout << "Found " << shards.size() << " shard(s) on disk.\n";
       for (const auto& s : shards) std::cout << "  " << s << "\n";
       return 0;
     }
 
     if (cmd == "verify") {
       print_config(cfg);
+      if (!has_tokenizer) {
+        std::cout << "warn: tokenizer.json missing: " << tok_json << "\n";
+      }
+
       if (shards.empty()) {
+        if (!expected_shards.empty()) {
+          std::cout << "Found 0 shard(s) on disk, but index expects " << expected_shards.size() << ":\n";
+          for (const auto& s : expected_shards) {
+            const auto p = model_dir + "/" + s;
+            std::cout << "  MISSING " << p << "\n";
+          }
+          throw std::runtime_error("no *.safetensors shards present yet");
+        }
         throw std::runtime_error("no *.safetensors shards found in: " + model_dir);
       }
 
