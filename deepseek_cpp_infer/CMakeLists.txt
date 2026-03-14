@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 option(DS_USE_CUDA "Build with CUDA" ON)
+option(DS_DETECT_CUDA_ARCH "Detect CUDA architecture from the local GPU" ON)
 
 # Prefer an installed toolkit under /usr/local/cuda when available.
 if(DS_USE_CUDA)
@@ -21,7 +22,32 @@ if(DS_USE_CUDA)
   if(NOT CUDAToolkit_FOUND)
     message(WARNING "No usable CUDAToolkit found; building CPU-only. Reconfigure with -DDS_USE_CUDA=OFF to silence this.")
     set(DS_USE_CUDA OFF)
+  elseif(DS_DETECT_CUDA_ARCH)
+    find_program(DS_NVIDIA_SMI_EXECUTABLE nvidia-smi)
+    if(DS_NVIDIA_SMI_EXECUTABLE)
+      execute_process(
+        COMMAND ${DS_NVIDIA_SMI_EXECUTABLE} --query-gpu=compute_cap --format=csv,noheader
+        OUTPUT_VARIABLE DS_COMPUTE_CAP
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+      )
+      string(REGEX MATCH "^[0-9]+\\.[0-9]+" DS_COMPUTE_CAP "${DS_COMPUTE_CAP}")
+      if(DS_COMPUTE_CAP)
+        string(REPLACE "." "" DS_CUDA_ARCH "${DS_COMPUTE_CAP}")
+        set(CMAKE_CUDA_ARCHITECTURES "${DS_CUDA_ARCH}" CACHE STRING "CUDA architectures" FORCE)
+        message(STATUS "Detected CUDA architecture ${CMAKE_CUDA_ARCHITECTURES} from nvidia-smi")
+      endif()
+    endif()
   endif()
+endif()
+
+set(DS_CUDA_RUNTIME_SOURCES)
+if(DS_USE_CUDA)
+  list(APPEND DS_CUDA_RUNTIME_SOURCES
+    src/ops/cuda/elementwise_kernels.cu
+    src/ops/cuda/attention_kernels.cu
+    src/ops/cuda/routing_kernels.cu
+  )
 endif()
 
 add_executable(ds_chat
@@ -32,13 +58,13 @@ add_executable(ds_chat
   src/util/mmap.cpp
   src/core/dtype.cpp
   src/core/tensor.cpp
-  src/core/ops.cpp
+  src/ops/core/ops.cpp
   src/core/math.cpp
   src/core/sampler.cpp
-  src/core/rope.cpp
+  src/ops/core/rope.cpp
   src/core/kv_cache.cpp
-  src/core/attention.cpp
-  src/core/mha.cpp
+  src/ops/core/attention.cpp
+  src/ops/core/mha.cpp
   src/hf/config.cpp
   src/hf/safetensors.cpp
   src/hf/weights_index.cpp
@@ -51,17 +77,19 @@ add_executable(ds_chat
   src/runtime/deepseek_model.cpp
   src/runtime/weights.cpp
   src/runtime/tokenizer.cpp
-  src/runtime/ops.cpp
-  src/runtime/mla.cpp
+  src/ops/runtime/ops.cpp
+  src/ops/runtime/mla.cpp
   src/runtime/model_executor.cpp
   src/runtime/cuda_backend.cpp
+  ${DS_CUDA_RUNTIME_SOURCES}
 )
 
 target_include_directories(ds_chat PRIVATE include)
 
 if(DS_USE_CUDA)
   target_compile_definitions(ds_chat PRIVATE DS_USE_CUDA=1)
-  target_link_libraries(ds_chat PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvrtc CUDA::cublas CUDA::cublasLt)
+  set_target_properties(ds_chat PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)
+  target_link_libraries(ds_chat PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::cublas CUDA::cublasLt)
 else()
   target_compile_definitions(ds_chat PRIVATE DS_USE_CUDA=0)
 endif()
@@ -76,8 +104,8 @@ add_executable(ds_tests
   src/util/path.cpp
   src/core/dtype.cpp
   src/core/math.cpp
-  src/core/ops.cpp
-  src/core/rope.cpp
+  src/ops/core/ops.cpp
+  src/ops/core/rope.cpp
   src/core/sampler.cpp
   src/hf/decode.cpp
   src/hf/safetensors.cpp
@@ -91,8 +119,8 @@ add_executable(ds_tests
   src/runtime/model_factory.cpp
   src/runtime/deepseek_model.cpp
   src/runtime/tokenizer.cpp
-  src/runtime/ops.cpp
-  src/runtime/mla.cpp
+  src/ops/runtime/ops.cpp
+  src/ops/runtime/mla.cpp
   src/runtime/model_executor.cpp
 )
 
@@ -114,8 +142,8 @@ if(DS_USE_CUDA)
     src/util/path.cpp
     src/core/dtype.cpp
     src/core/math.cpp
-    src/core/ops.cpp
-    src/core/rope.cpp
+    src/ops/core/ops.cpp
+    src/ops/core/rope.cpp
     src/core/sampler.cpp
     src/hf/decode.cpp
     src/hf/safetensors.cpp
@@ -129,14 +157,16 @@ if(DS_USE_CUDA)
     src/runtime/deepseek_model.cpp
     src/runtime/weights.cpp
     src/runtime/tokenizer.cpp
-    src/runtime/ops.cpp
-    src/runtime/mla.cpp
+    src/ops/runtime/ops.cpp
+    src/ops/runtime/mla.cpp
     src/runtime/model_executor.cpp
     src/runtime/cuda_backend.cpp
+    ${DS_CUDA_RUNTIME_SOURCES}
   )
   target_include_directories(ds_cuda_tests PRIVATE include)
   target_compile_definitions(ds_cuda_tests PRIVATE DS_USE_CUDA=1)
-  target_link_libraries(ds_cuda_tests PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::nvrtc CUDA::cublas CUDA::cublasLt)
+  set_target_properties(ds_cuda_tests PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)
+  target_link_libraries(ds_cuda_tests PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::cublas CUDA::cublasLt)
   add_test(NAME ds_cuda_runtime_smoke COMMAND ds_cuda_tests)
   add_test(
     NAME ds_cli_cuda_e2e
