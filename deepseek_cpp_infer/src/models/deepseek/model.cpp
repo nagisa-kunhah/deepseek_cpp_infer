@@ -1,9 +1,9 @@
-#include "ds/runtime/deepseek_model.h"
+#include "ds/models/deepseek/model.h"
 
 #include "ds/core/math.h"
 #include "ds/core/ops.h"
 #include "ds/hf/weight_ops.h"
-#include "ds/runtime/ops.h"
+#include "ds/models/deepseek/ops.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -92,7 +92,7 @@ const cuda::CudaStats& DeepSeekSession::cuda_stats() const {
 
 DeepSeekModel::DeepSeekModel(const ds::hf::DeepSeekConfig& cfg, ds::hf::LoadedModel model)
     : cfg_(cfg), model_(std::move(model)), registry_(DeepSeekWeightRegistry::from_model(cfg_, model_)) {
-  info_.family = ModelFamily::DeepSeek;
+  info_.family_id = "deepseek";
   info_.model_type = cfg_.model_type;
   info_.vocab_size = cfg_.vocab_size;
   info_.max_position_embeddings = cfg_.max_position_embeddings;

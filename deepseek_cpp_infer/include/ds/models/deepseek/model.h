@@ -1,11 +1,11 @@
 #pragma once
 
-#include "ds/hf/config.h"
+#include "ds/models/deepseek/config.h"
+#include "ds/models/deepseek/cuda_backend.h"
+#include "ds/models/deepseek/mla.h"
+#include "ds/models/deepseek/weights.h"
 #include "ds/hf/model_loader.h"
-#include "ds/runtime/cuda_backend.h"
 #include "ds/runtime/model.h"
-#include "ds/runtime/mla.h"
-#include "ds/runtime/weights.h"
 
 #include <cstddef>
 #include <memory>

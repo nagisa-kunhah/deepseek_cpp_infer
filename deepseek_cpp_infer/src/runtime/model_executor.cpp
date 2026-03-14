@@ -2,8 +2,6 @@
 
 #include "ds/runtime/model.h"
 
-#include <stdexcept>
-
 namespace ds::rt {
 
 namespace {
@@ -15,16 +13,9 @@ StepResult to_step_result(const ForwardOutput& out) {
   return step;
 }
 
-const DeepSeekSession& require_deepseek_session(const std::unique_ptr<ModelSession>& session) {
-  auto* deepseek_session = dynamic_cast<const DeepSeekSession*>(session.get());
-  if (deepseek_session == nullptr) throw std::runtime_error("executor: session is not DeepSeekSession");
-  return *deepseek_session;
-}
-
 } // namespace
 
-ModelExecutor::ModelExecutor(const ds::hf::DeepSeekConfig& cfg, ds::hf::LoadedModel model, RunConfig run_cfg) {
-  model_ = std::make_unique<DeepSeekModel>(cfg, std::move(model));
+ModelExecutor::ModelExecutor(std::shared_ptr<const Model> model, RunConfig run_cfg) : model_(std::move(model)) {
   session_ = model_->create_session(run_cfg);
 }
 
@@ -38,10 +29,6 @@ void ModelExecutor::reset() {
   session_->reset();
   pos_ = 0;
 }
-
-const WeightRegistry& ModelExecutor::registry() const { return model_->registry(); }
-
-const cuda::CudaStats& ModelExecutor::cuda_stats() const { return require_deepseek_session(session_).cuda_stats(); }
 
 StepResult ModelExecutor::decode_next(std::int32_t token_id) {
   const auto out = model_->forward(*session_, ForwardInput{{token_id}});

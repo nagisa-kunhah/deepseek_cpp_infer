@@ -1,7 +1,7 @@
 #pragma once
 
-#include "ds/hf/config.h"
 #include "ds/hf/model_loader.h"
+#include "ds/models/deepseek/config.h"
 
 #include <cstddef>
 #include <string>

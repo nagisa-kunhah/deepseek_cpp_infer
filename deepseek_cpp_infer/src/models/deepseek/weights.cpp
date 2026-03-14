@@ -1,4 +1,4 @@
-#include "ds/runtime/weights.h"
+#include "ds/models/deepseek/weights.h"
 
 #include "ds/hf/decode.h"
 

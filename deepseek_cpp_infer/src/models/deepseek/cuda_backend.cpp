@@ -1,5 +1,5 @@
-#include "ds/runtime/cuda_backend.h"
-#include "ds/runtime/cuda_kernels.h"
+#include "ds/models/deepseek/cuda_backend.h"
+#include "ds/models/deepseek/cuda_kernels.h"
 
 #include <stdexcept>
 

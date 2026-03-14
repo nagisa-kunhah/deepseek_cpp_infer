@@ -1,8 +1,8 @@
 #pragma once
 
-#include "ds/hf/config.h"
 #include "ds/hf/model_loader.h"
-#include "ds/runtime/weights.h"
+#include "ds/models/deepseek/config.h"
+#include "ds/models/deepseek/weights.h"
 
 #include <cstddef>
 #include <cstdint>
