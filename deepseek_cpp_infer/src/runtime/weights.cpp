@@ -1,5 +1,7 @@
 #include "ds/runtime/weights.h"
 
+#include "ds/hf/decode.h"
+
 #include <stdexcept>
 
 namespace ds::rt {
@@ -15,6 +17,20 @@ const ds::hf::TensorSlice* find_optional(const ds::hf::LoadedModel& model, const
   auto it = model.tensors.find(name);
   if (it == model.tensors.end()) return nullptr;
   return &it->second;
+}
+
+NormWeights required_norm(const ds::hf::LoadedModel& model, const std::string& name) {
+  NormWeights out;
+  out.weight = find_required(model, name);
+  out.f32 = ds::hf::decode_to_f32(*out.weight);
+  return out;
+}
+
+NormWeights optional_norm(const ds::hf::LoadedModel& model, const std::string& name) {
+  NormWeights out;
+  out.weight = find_optional(model, name);
+  if (out.weight != nullptr) out.f32 = ds::hf::decode_to_f32(*out.weight);
+  return out;
 }
 
 LinearWeights required_linear(const ds::hf::LoadedModel& model, const std::string& weight_name,
@@ -38,7 +54,7 @@ DenseMLPWeights required_dense_mlp(const ds::hf::LoadedModel& model, const std::
 WeightRegistry WeightRegistry::from_model(const ds::hf::DeepSeekConfig& cfg, const ds::hf::LoadedModel& model) {
   WeightRegistry registry;
   registry.global_.embed_tokens = find_required(model, "model.embed_tokens.weight");
-  registry.global_.final_norm = find_required(model, "model.norm.weight");
+  registry.global_.final_norm = required_norm(model, "model.norm.weight");
   registry.global_.lm_head = find_required(model, "lm_head.weight");
 
   registry.layers_.resize(static_cast<std::size_t>(cfg.num_hidden_layers));
@@ -48,15 +64,15 @@ WeightRegistry WeightRegistry::from_model(const ds::hf::DeepSeekConfig& cfg, con
     const std::string attn = base + "self_attn.";
     const std::string mlp = base + "mlp.";
 
-    layer.input_layernorm.weight = find_required(model, base + "input_layernorm.weight");
-    layer.post_attention_layernorm.weight = find_required(model, base + "post_attention_layernorm.weight");
+    layer.input_layernorm = required_norm(model, base + "input_layernorm.weight");
+    layer.post_attention_layernorm = required_norm(model, base + "post_attention_layernorm.weight");
 
     layer.attention.q_proj.weight = find_optional(model, attn + "q_proj.weight");
     layer.attention.q_a_proj.weight = find_optional(model, attn + "q_a_proj.weight");
-    layer.attention.q_a_layernorm.weight = find_optional(model, attn + "q_a_layernorm.weight");
+    layer.attention.q_a_layernorm = optional_norm(model, attn + "q_a_layernorm.weight");
     layer.attention.q_b_proj.weight = find_optional(model, attn + "q_b_proj.weight");
     layer.attention.kv_a_proj_with_mqa = required_linear(model, attn + "kv_a_proj_with_mqa.weight");
-    layer.attention.kv_a_layernorm.weight = find_required(model, attn + "kv_a_layernorm.weight");
+    layer.attention.kv_a_layernorm = required_norm(model, attn + "kv_a_layernorm.weight");
     layer.attention.kv_b_proj = required_linear(model, attn + "kv_b_proj.weight");
     layer.attention.o_proj = required_linear(model, attn + "o_proj.weight");
     layer.attention.use_q_lora = layer.attention.q_a_proj.valid() && layer.attention.q_b_proj.valid();

@@ -3,7 +3,6 @@
 #include "ds/core/math.h"
 #include "ds/core/ops.h"
 #include "ds/core/rope.h"
-#include "ds/hf/decode.h"
 #include "ds/runtime/ops.h"
 
 #include <algorithm>
@@ -63,8 +62,7 @@ void mla_decode_step(const ds::hf::DeepSeekConfig& cfg, const AttentionWeights& 
     std::vector<float> q_a(q_rank, 0.0f);
     std::vector<float> q_a_norm(q_rank, 0.0f);
     linear_backend(backend, attn.q_a_proj, hidden, hidden_size, q_a.data(), q_rank);
-    const auto q_ln = ds::hf::decode_to_f32(*attn.q_a_layernorm.weight);
-    rmsnorm_backend(backend, q_a.data(), q_ln.data(), q_rank, cfg.rms_norm_eps, q_a_norm.data());
+    rmsnorm_backend(backend, q_a.data(), attn.q_a_layernorm.data(), q_rank, cfg.rms_norm_eps, q_a_norm.data());
     linear_backend(backend, attn.q_b_proj, q_a_norm.data(), q_rank, q_full.data(), n_heads * q_head);
   } else {
     linear_backend(backend, attn.q_proj, hidden, hidden_size, q_full.data(), n_heads * q_head);
@@ -76,8 +74,7 @@ void mla_decode_step(const ds::hf::DeepSeekConfig& cfg, const AttentionWeights& 
   std::vector<float> kv_norm(kv_rank, 0.0f);
   std::vector<float> kv_compressed(kv_rank, 0.0f);
   std::copy(kv_a.begin(), kv_a.begin() + static_cast<std::ptrdiff_t>(kv_rank), kv_compressed.begin());
-  const auto kv_ln = ds::hf::decode_to_f32(*attn.kv_a_layernorm.weight);
-  rmsnorm_backend(backend, kv_compressed.data(), kv_ln.data(), kv_rank, cfg.rms_norm_eps, kv_norm.data());
+  rmsnorm_backend(backend, kv_compressed.data(), attn.kv_a_layernorm.data(), kv_rank, cfg.rms_norm_eps, kv_norm.data());
 
   std::vector<float> kv_b(n_heads * (qk_nope + v_head), 0.0f);
   linear_backend(backend, attn.kv_b_proj, kv_norm.data(), kv_rank, kv_b.data(), n_heads * (qk_nope + v_head));

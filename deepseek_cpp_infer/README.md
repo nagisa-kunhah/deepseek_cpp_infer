@@ -36,10 +36,12 @@ cmake --build build -j
 ## Runtime Notes
 
 - CPU path is correctness-first and streams BF16/F16/F32 weights row-by-row.
-- CUDA bootstrap path now exists for mock/small-model execution:
-  - `matvec` and `RMSNorm` use a runtime-compiled CUDA backend (`NVRTC + driver API`)
-  - attention control flow, RoPE, cache updates, and MoE routing still stay in the C++ executor
-  - large weights may still fall back to CPU in the current bootstrap path
+- CUDA phase-1 path now exists for mock/small-model execution:
+  - uses the installed CUDA toolkit (`NVRTC + CUDA Driver API + cuBLAS`)
+  - keeps activations and per-layer MLA KV cache resident on device during decode
+  - offloads `RMSNorm`, linear/GEMV, RoPE, MLA score/softmax/value accumulation, and token-local MoE routing
+  - uses cached full-weight uploads for small/medium tensors and row-chunk streaming GEMV for large tensors
+  - exposes internal CUDA hit/fallback stats for regression tests
 - `--prompt` works through a minimal tokenizer implementation. For exact/reliable smoke
   runs, prefer `--prompt-ids`.
 - Current RoPE path uses the base theta path and does not yet implement the full
@@ -61,10 +63,11 @@ ctest --test-dir build --output-on-failure
 The repository includes:
 
 - `tests/runtime_smoke.cpp` for runtime unit smoke coverage
+- `tests/cuda_runtime_smoke.cpp` for CPU/CUDA executor parity and CUDA hit coverage
 - `tests/run_e2e_cli.py` for the full `info/verify/strict/load/run/generate` CLI chain
 
-If CUDA wheel packages are available in the user environment, `ctest` also runs
-the same mock flow with `--backend cuda`.
+If a CUDA toolkit is available in the user environment, `ctest` also runs the
+same mock flow with `--backend cuda`.
 
 Architecture and implementation notes:
 
@@ -72,3 +75,4 @@ Architecture and implementation notes:
 - `docs/deepseek_v2_lite_architecture.md`
 - `docs/runtime_design.md`
 - `docs/implementation_plan.md`
+- `docs/gpu_phase1_retrospective.md`

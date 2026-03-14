@@ -7,7 +7,7 @@ Date: 2026-03-14
 The repository is no longer just a model-directory verifier. It now contains a
 documented runtime skeleton, a semantic weight registry, a lightweight
 `tokenizer.json` loader, a single-session decode executor, and both CPU and
-bootstrap CUDA execution paths.
+phase-1 CUDA execution paths.
 
 ## What Works
 
@@ -16,10 +16,11 @@ bootstrap CUDA execution paths.
 - `run` and `generate` work end-to-end on the repository's mock DeepSeek-V2-Lite
   model.
 - CPU path works on the mock model.
-- `--backend cuda` also works on the mock model through a bootstrap CUDA path.
+- `--backend cuda` works on the mock model through a device-resident CUDA path.
 - `ctest --test-dir build --output-on-failure` passes with:
   - `ds_runtime_smoke`
   - `ds_cli_e2e`
+  - `ds_cuda_runtime_smoke`
   - `ds_cli_cuda_e2e`
 
 ## Real Model Findings
@@ -42,24 +43,29 @@ Conclusion:
 
 - real-model `verify/load` work
 - real-model CPU `run/generate` do not currently fit this machine
+- real-model CUDA `run --prompt-ids 0` now enters the CUDA forward path without
+  immediately OOMing, but did not finish within a 90 second smoke timeout on
+  this machine
 
 ## CUDA Status
 
-The CUDA backend is a bootstrap implementation, not a full high-performance
-backend yet.
+The CUDA backend now covers much more of the decode path, but it is still not a
+fully optimized inference backend yet.
 
 - Uses `NVRTC + CUDA Driver API`
-- Runtime-compiles kernels on first use
+- Uses toolkit `cuBLAS` directly for GEMV hot paths
+- Runtime-compiles helper kernels on first use
 - Offloads:
   - `RMSNorm`
-  - `matvec` / linear layers
-- Leaves the following in the current C++ control flow:
-  - attention control logic
-  - RoPE orchestration
-  - KV cache updates
-  - MoE routing decisions
-
-Large weights can still fall back to the CPU path in this bootstrap backend.
+  - linear / `lm_head` GEMV
+  - RoPE
+  - MLA score/softmax/value accumulation
+  - device-side MLA KV cache updates
+  - token-local MoE routing and expert accumulation
+- Keeps hidden-state, norm, delta, logits, and MLA cache buffers resident on the
+  device inside the executor
+- Streams large weights row-by-row to the GPU instead of forcing a CPU fallback
+- Exposes CUDA hit/fallback stats for parity tests
 
 ## Main Limitations
 
@@ -68,11 +74,14 @@ Large weights can still fall back to the CPU path in this bootstrap backend.
 - the `RTX 4060 Laptop 8GB` cannot hold the raw full model in VRAM
 - tokenizer implementation is still lightweight and not fully Hugging Face
   compatible
-- CUDA path does not yet cover full attention/MoE math or cuBLAS hot paths
+- CUDA path still launches many small kernels and row-chunk GEMV uploads, so
+  real-model latency is still high
+- there is not yet a quantized or paged-weight path for fitting more of the
+  real model in 8 GB VRAM
 
 ## Next Good Steps
 
-- move more attention/MoE math to CUDA
-- replace bootstrap CUDA matvec kernels with cuBLAS/cuBLASLt
+- reduce kernel launch count and weight streaming overhead on the real model
+- add chunked expert decode/compute for very large MoE weights
 - add a quantized or reduced-memory route for running Lite-class models on 8 GB
   GPUs

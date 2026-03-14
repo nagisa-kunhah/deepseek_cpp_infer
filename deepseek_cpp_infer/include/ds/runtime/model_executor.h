@@ -4,6 +4,7 @@
 #include "ds/hf/config.h"
 #include "ds/hf/model_loader.h"
 #include "ds/runtime/backend.h"
+#include "ds/runtime/cuda_backend.h"
 #include "ds/runtime/mla.h"
 #include "ds/runtime/tokenizer.h"
 #include "ds/runtime/weights.h"
@@ -22,11 +23,13 @@ struct StepResult {
 class ModelExecutor {
  public:
   ModelExecutor(const ds::hf::DeepSeekConfig& cfg, ds::hf::LoadedModel model, RunConfig run_cfg);
+  ~ModelExecutor();
 
   void reset();
   std::size_t position() const { return pos_; }
 
   const WeightRegistry& registry() const { return registry_; }
+  const cuda::CudaStats& cuda_stats() const;
 
   StepResult prefill(const std::vector<std::int32_t>& prompt_ids);
   StepResult decode_next(std::int32_t token_id);
@@ -39,6 +42,7 @@ class ModelExecutor {
   ds::hf::LoadedModel model_;
   WeightRegistry registry_;
   std::vector<MLACache> caches_;
+  cuda::CudaExecutorState* cuda_state_ = nullptr;
   std::size_t pos_ = 0;
 };
 
