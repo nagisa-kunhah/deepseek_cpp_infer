@@ -2,11 +2,17 @@
 #include "ds/hf/model_loader.h"
 #include "ds/hf/safetensors.h"
 #include "ds/hf/weights_index.h"
+#include "ds/runtime/backend.h"
+#include "ds/runtime/model_executor.h"
+#include "ds/runtime/tokenizer.h"
+#include "ds/runtime/weights.h"
 #include "ds/util/path.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <iostream>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_set>
 
 namespace {
@@ -26,16 +32,103 @@ void print_config(const ds::hf::DeepSeekConfig& cfg) {
   std::cout << "  max_pos: " << cfg.max_position_embeddings << "\n";
   std::cout << "  rope_theta: " << cfg.rope_theta << "\n";
   std::cout << "  n_experts: " << cfg.n_experts << "\n";
+  std::cout << "  n_shared_experts: " << cfg.n_shared_experts << "\n";
   std::cout << "  moe_top_k: " << cfg.moe_top_k << "\n";
+  std::cout << "  kv_lora_rank: " << cfg.kv_lora_rank << "\n";
+  std::cout << "  qk_nope_head_dim: " << cfg.qk_nope_head_dim << "\n";
+  std::cout << "  qk_rope_head_dim: " << cfg.qk_rope_head_dim << "\n";
+  std::cout << "  v_head_dim: " << cfg.v_head_dim << "\n";
 }
 
 [[noreturn]] void usage() {
   throw std::runtime_error(
-      "usage: ds_chat <model_dir> [info|verify|strict|load]\n"
+      "usage: ds_chat <model_dir> [info|verify|strict|load|run|generate] [options]\n"
       "  info:   print config + index + shard list\n"
       "  verify: validate required tensor keys via index; if shards exist, parse headers (default)\n"
       "  strict: verify + print dense/MoE layer map inferred from index\n"
-      "  load:   mmap shards and build tensor views (no inference yet)\n");
+      "  load:   mmap shards and build tensor views\n"
+      "  run:    execute prompt prefill and print the next-token prediction\n"
+      "  generate: autoregressive decode\n"
+      "options for run/generate:\n"
+      "  --prompt <text>\n"
+      "  --prompt-ids <id0,id1,...>\n"
+      "  --max-new-tokens <n>\n"
+      "  --temperature <float>\n"
+      "  --top-k <int>\n"
+      "  --top-p <float>\n"
+      "  --backend <cpu|cuda>\n"
+      "  --seed <int>\n");
+}
+
+struct CmdOptions {
+  std::string prompt;
+  std::string prompt_ids_csv;
+  std::int32_t max_new_tokens = 1;
+  float temperature = 0.0f;
+  std::int32_t top_k = 0;
+  float top_p = 0.0f;
+  std::string backend = "cpu";
+  std::uint32_t seed = 0;
+};
+
+std::vector<std::int32_t> parse_prompt_ids_csv(const std::string& csv) {
+  if (csv.empty()) return {};
+  std::vector<std::int32_t> ids;
+  std::size_t start = 0;
+  while (start < csv.size()) {
+    const auto end = csv.find(',', start);
+    const auto token = csv.substr(start, end == std::string::npos ? std::string::npos : end - start);
+    if (!token.empty()) ids.push_back(static_cast<std::int32_t>(std::stol(token)));
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+  return ids;
+}
+
+CmdOptions parse_cmd_options(int argc, char** argv, int start_arg) {
+  CmdOptions opts;
+  for (int i = start_arg; i < argc; ++i) {
+    const std::string_view key = argv[i];
+    auto require_value = [&](const char* flag) -> std::string {
+      if (i + 1 >= argc) throw std::runtime_error(std::string("missing value for ") + flag);
+      ++i;
+      return argv[i];
+    };
+
+    if (key == "--prompt") {
+      opts.prompt = require_value("--prompt");
+    } else if (key == "--prompt-ids") {
+      opts.prompt_ids_csv = require_value("--prompt-ids");
+    } else if (key == "--max-new-tokens") {
+      opts.max_new_tokens = static_cast<std::int32_t>(std::stol(require_value("--max-new-tokens")));
+    } else if (key == "--temperature") {
+      opts.temperature = std::stof(require_value("--temperature"));
+    } else if (key == "--top-k") {
+      opts.top_k = static_cast<std::int32_t>(std::stol(require_value("--top-k")));
+    } else if (key == "--top-p") {
+      opts.top_p = std::stof(require_value("--top-p"));
+    } else if (key == "--backend") {
+      opts.backend = require_value("--backend");
+    } else if (key == "--seed") {
+      opts.seed = static_cast<std::uint32_t>(std::stoul(require_value("--seed")));
+    } else {
+      throw std::runtime_error("unknown option: " + std::string(key));
+    }
+  }
+  return opts;
+}
+
+std::vector<std::int32_t> resolve_prompt_ids(const CmdOptions& opts, const std::string& tok_json, bool has_tokenizer,
+                                             ds::rt::Tokenizer* tokenizer) {
+  if (!opts.prompt_ids_csv.empty()) return parse_prompt_ids_csv(opts.prompt_ids_csv);
+  if (opts.prompt.empty()) {
+    throw std::runtime_error("run/generate requires --prompt or --prompt-ids");
+  }
+  if (!has_tokenizer) {
+    throw std::runtime_error("tokenizer.json is required to encode --prompt; use --prompt-ids instead");
+  }
+  *tokenizer = ds::rt::Tokenizer::load_from_file(tok_json);
+  return tokenizer->encode(opts.prompt);
 }
 
 } // namespace
@@ -94,7 +187,61 @@ int main(int argc, char** argv) {
       if (it != m.tensors.end()) {
         std::cout << "Sample tensor: " << it->second.name << " bytes=" << it->second.nbytes << " shard=" << it->second.shard_path << "\n";
       }
+
+      const auto registry = ds::rt::WeightRegistry::from_model(cfg, m);
+      std::cout << "Layer registry:\n";
+      for (std::size_t i = 0; i < registry.layers().size(); ++i) {
+        std::cout << "  layer " << i << ": " << ds::rt::layer_kind_name(registry.layers()[i].kind) << "\n";
+      }
       std::cout << "OK\n";
+      return 0;
+    }
+
+    if (cmd == "run" || cmd == "generate") {
+      const auto opts = parse_cmd_options(argc, argv, 3);
+      ds::rt::Tokenizer tokenizer;
+      const auto prompt_ids = resolve_prompt_ids(opts, tok_json, has_tokenizer, &tokenizer);
+      if (prompt_ids.empty()) throw std::runtime_error("prompt resolved to zero token ids");
+
+      auto model = ds::hf::load_model_dir(model_dir);
+      if (has_tokenizer && tokenizer.empty()) tokenizer = ds::rt::Tokenizer::load_from_file(tok_json);
+      ds::rt::ModelExecutor executor(
+          cfg, std::move(model),
+          ds::rt::RunConfig{
+              .backend = ds::rt::parse_backend_kind(opts.backend),
+              .max_seq = static_cast<std::size_t>(cfg.max_position_embeddings),
+              .verbose = false,
+          });
+
+      if (cmd == "run") {
+        const auto step = executor.prefill(prompt_ids);
+        const auto next_id = step.greedy_token_id;
+        std::cout << "Prompt tokens: " << prompt_ids.size() << "\n";
+        std::cout << "Next token id: " << next_id << "\n";
+        if (has_tokenizer) {
+          if (tokenizer.empty()) tokenizer = ds::rt::Tokenizer::load_from_file(tok_json);
+          std::cout << "Next token text: " << tokenizer.decode({next_id}) << "\n";
+        }
+        return 0;
+      }
+
+      ds::rt::GenerationConfig gen_cfg{
+          .max_new_tokens = opts.max_new_tokens,
+          .temperature = opts.temperature,
+          .top_k = opts.top_k,
+          .top_p = opts.top_p,
+          .seed = opts.seed,
+      };
+      std::vector<std::string> pieces;
+      const auto ids = executor.generate(prompt_ids, gen_cfg, has_tokenizer ? &tokenizer : nullptr, has_tokenizer ? &pieces : nullptr);
+      std::cout << "Generated ids:";
+      for (auto id : ids) std::cout << " " << id;
+      std::cout << "\n";
+      if (has_tokenizer) {
+        std::cout << "Generated text: ";
+        for (const auto& piece : pieces) std::cout << piece;
+        std::cout << "\n";
+      }
       return 0;
     }
 

@@ -19,8 +19,22 @@ struct DeepSeekConfig {
 
   // MoE-ish knobs (names vary per repo; we parse with fallbacks).
   std::int32_t n_experts = 0;
+  std::int32_t n_shared_experts = 0;
   std::int32_t moe_top_k = 2;
   std::int32_t moe_intermediate_size = 0;
+  std::int32_t first_k_dense_replace = 0;
+  std::int32_t moe_layer_freq = 1;
+  float routed_scaling_factor = 1.0f;
+  bool norm_topk_prob = false;
+  std::string scoring_func = "softmax";
+  std::string topk_method = "greedy";
+
+  // DeepSeek-V2 attention / MLA-ish knobs.
+  std::int32_t q_lora_rank = 0; // 0 means disabled / null in HF config.
+  std::int32_t kv_lora_rank = 0;
+  std::int32_t qk_nope_head_dim = 0;
+  std::int32_t qk_rope_head_dim = 0;
+  std::int32_t v_head_dim = 0;
 
   // Rotary.
   float rope_theta = 10000.0f;
