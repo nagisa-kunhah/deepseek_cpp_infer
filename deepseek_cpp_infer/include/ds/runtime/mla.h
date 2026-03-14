@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ds/hf/config.h"
+#include "ds/runtime/backend.h"
 #include "ds/runtime/weights.h"
 
 #include <cstddef>
@@ -25,7 +26,7 @@ struct MLACache {
   const float* val_ptr(std::size_t pos, std::size_t head) const;
 };
 
-void mla_decode_step_cpu(const ds::hf::DeepSeekConfig& cfg, const AttentionWeights& attn, const float* hidden,
-                         std::size_t pos, MLACache* cache, float* out_hidden);
+void mla_decode_step(const ds::hf::DeepSeekConfig& cfg, const AttentionWeights& attn, const float* hidden,
+                     std::size_t pos, MLACache* cache, float* out_hidden, BackendKind backend);
 
 } // namespace ds::rt

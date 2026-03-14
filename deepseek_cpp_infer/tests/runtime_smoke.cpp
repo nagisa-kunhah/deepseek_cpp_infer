@@ -165,7 +165,7 @@ void test_mla_smoke() {
 
   const float hidden[4] = {1, 2, 3, 4};
   float out[4] = {0, 0, 0, 0};
-  ds::rt::mla_decode_step_cpu(cfg, attn, hidden, 0, &cache, out);
+  ds::rt::mla_decode_step(cfg, attn, hidden, 0, &cache, out, ds::rt::BackendKind::CPU);
   for (float v : out) assert(std::isfinite(v));
 }
 

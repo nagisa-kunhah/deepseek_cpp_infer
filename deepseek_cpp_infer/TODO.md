@@ -32,6 +32,8 @@
 
 - [x] Mmap weights (read-only) / lazy view layer (no tensor materialization)
 - [ ] Threading, batching
-- [ ] CUDA kernels / cuBLAS integration
+- [x] CUDA bootstrap backend (`NVRTC + driver API`) for mock/small-model matvec + RMSNorm
+- [ ] Expand CUDA coverage to attention softmax/cache math and reduce CPU fallbacks
+- [ ] Replace bootstrap CUDA matvec kernels with cuBLAS/cuBLASLt hot paths
 - [ ] Blocked decode for large expert matrices
 - [ ] Full tokenizer parity with Hugging Face tokenizers

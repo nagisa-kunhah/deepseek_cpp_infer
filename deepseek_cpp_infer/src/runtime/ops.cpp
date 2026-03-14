@@ -1,7 +1,9 @@
 #include "ds/runtime/ops.h"
 
 #include "ds/core/math.h"
+#include "ds/core/ops.h"
 #include "ds/hf/decode.h"
+#include "ds/runtime/cuda_backend.h"
 
 #include <algorithm>
 #include <cmath>
@@ -66,25 +68,53 @@ void linear(const LinearWeights& linear_weight, const float* x, std::size_t in, 
   add_bias(linear_weight.bias, y, out);
 }
 
-void dense_mlp_step_cpu(const DenseMLPWeights& mlp, const float* x, std::size_t hidden_size, float* out) {
+void linear_backend(BackendKind backend, const ds::hf::TensorSlice& weight, const float* x, std::size_t in, float* y,
+                    std::size_t out) {
+#if DS_USE_CUDA
+  if (backend == BackendKind::CUDA && ds::rt::cuda::linear_try(weight, x, in, y, out)) return;
+#else
+  static_cast<void>(backend);
+#endif
+  linear(weight, x, in, y, out);
+}
+
+void linear_backend(BackendKind backend, const LinearWeights& linear_weight, const float* x, std::size_t in, float* y,
+                    std::size_t out) {
+  if (!linear_weight.valid()) throw std::runtime_error("linear: missing weight");
+  linear_backend(backend, *linear_weight.weight, x, in, y, out);
+  add_bias(linear_weight.bias, y, out);
+}
+
+void rmsnorm_backend(BackendKind backend, const float* x, const float* w, std::size_t n, float eps, float* y) {
+#if DS_USE_CUDA
+  if (backend == BackendKind::CUDA && ds::rt::cuda::rmsnorm_try(x, w, n, eps, y)) return;
+#else
+  static_cast<void>(backend);
+#endif
+  ds::core::rmsnorm_f32(x, w, n, eps, y);
+}
+
+void dense_mlp_step(BackendKind backend, const DenseMLPWeights& mlp, const float* x, std::size_t hidden_size, float* out) {
   if (!mlp.valid()) throw std::runtime_error("dense mlp: missing weights");
 
   const auto intermediate = static_cast<std::size_t>(mlp.gate_proj.weight->shape[0]);
-  std::vector<float> gate = matvec(*mlp.gate_proj.weight, x, hidden_size, intermediate);
-  std::vector<float> up = matvec(*mlp.up_proj.weight, x, hidden_size, intermediate);
+  std::vector<float> gate(intermediate, 0.0f);
+  std::vector<float> up(intermediate, 0.0f);
+  linear_backend(backend, *mlp.gate_proj.weight, x, hidden_size, gate.data(), intermediate);
+  linear_backend(backend, *mlp.up_proj.weight, x, hidden_size, up.data(), intermediate);
   for (std::size_t i = 0; i < intermediate; ++i) gate[i] = silu(gate[i]) * up[i];
 
-  linear(*mlp.down_proj.weight, gate.data(), intermediate, out, hidden_size);
+  linear_backend(backend, *mlp.down_proj.weight, gate.data(), intermediate, out, hidden_size);
 }
 
-void moe_step_cpu(const ds::hf::DeepSeekConfig& cfg, const MoEWeights& moe, const float* x, std::size_t hidden_size,
-                  float* out) {
+void moe_step(BackendKind backend, const ds::hf::DeepSeekConfig& cfg, const MoEWeights& moe, const float* x,
+              std::size_t hidden_size, float* out) {
   if (!moe.valid()) throw std::runtime_error("moe: missing routed experts");
   std::fill(out, out + hidden_size, 0.0f);
 
   const auto n_experts = static_cast<std::size_t>(moe.experts.size());
   std::vector<float> scores(n_experts, 0.0f);
-  linear(*moe.gate.weight, x, hidden_size, scores.data(), n_experts);
+  linear_backend(backend, *moe.gate.weight, x, hidden_size, scores.data(), n_experts);
   ds::core::softmax_f32(scores.data(), scores.size());
 
   const std::size_t top_k = std::min<std::size_t>(std::max<std::int32_t>(1, cfg.moe_top_k), n_experts);
@@ -103,24 +133,25 @@ void moe_step_cpu(const ds::hf::DeepSeekConfig& cfg, const MoEWeights& moe, cons
   std::vector<float> tmp(hidden_size, 0.0f);
   for (std::size_t i = 0; i < top_ids.size(); ++i) {
     std::fill(tmp.begin(), tmp.end(), 0.0f);
-    dense_mlp_step_cpu(moe.experts[top_ids[i]].ffn, x, hidden_size, tmp.data());
+    dense_mlp_step(backend, moe.experts[top_ids[i]].ffn, x, hidden_size, tmp.data());
     const float scale = top_probs[i] * cfg.routed_scaling_factor;
     for (std::size_t j = 0; j < hidden_size; ++j) out[j] += scale * tmp[j];
   }
 
   if (moe.shared_experts.valid()) {
     std::fill(tmp.begin(), tmp.end(), 0.0f);
-    dense_mlp_step_cpu(moe.shared_experts, x, hidden_size, tmp.data());
+    dense_mlp_step(backend, moe.shared_experts, x, hidden_size, tmp.data());
     for (std::size_t j = 0; j < hidden_size; ++j) out[j] += tmp[j];
   }
 }
 
-void lm_head_logits_cpu(const ds::hf::TensorSlice& lm_head_weight, const float* hidden, std::vector<float>* logits) {
+void lm_head_logits(BackendKind backend, const ds::hf::TensorSlice& lm_head_weight, const float* hidden,
+                    std::vector<float>* logits) {
   if (lm_head_weight.shape.size() != 2) throw std::runtime_error("lm_head: expected 2D weight");
   const auto vocab = static_cast<std::size_t>(lm_head_weight.shape[0]);
   const auto hidden_size = static_cast<std::size_t>(lm_head_weight.shape[1]);
   logits->assign(vocab, 0.0f);
-  linear(lm_head_weight, hidden, hidden_size, logits->data(), vocab);
+  linear_backend(backend, lm_head_weight, hidden, hidden_size, logits->data(), vocab);
 }
 
 } // namespace ds::rt

@@ -36,7 +36,10 @@ cmake --build build -j
 ## Runtime Notes
 
 - CPU path is correctness-first and streams BF16/F16/F32 weights row-by-row.
-- CUDA is part of the public API surface (`--backend cuda`) but is still a stub.
+- CUDA bootstrap path now exists for mock/small-model execution:
+  - `matvec` and `RMSNorm` use a runtime-compiled CUDA backend (`NVRTC + driver API`)
+  - attention control flow, RoPE, cache updates, and MoE routing still stay in the C++ executor
+  - large weights may still fall back to CPU in the current bootstrap path
 - `--prompt` works through a minimal tokenizer implementation. For exact/reliable smoke
   runs, prefer `--prompt-ids`.
 - Current RoPE path uses the base theta path and does not yet implement the full
@@ -59,6 +62,9 @@ The repository includes:
 
 - `tests/runtime_smoke.cpp` for runtime unit smoke coverage
 - `tests/run_e2e_cli.py` for the full `info/verify/strict/load/run/generate` CLI chain
+
+If CUDA wheel packages are available in the user environment, `ctest` also runs
+the same mock flow with `--backend cuda`.
 
 Architecture and implementation notes:
 

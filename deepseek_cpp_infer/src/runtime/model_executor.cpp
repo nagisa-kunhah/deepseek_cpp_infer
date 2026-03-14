@@ -4,6 +4,7 @@
 #include "ds/core/ops.h"
 #include "ds/hf/decode.h"
 #include "ds/hf/weight_ops.h"
+#include "ds/runtime/cuda_backend.h"
 #include "ds/runtime/ops.h"
 
 #include <algorithm>
@@ -18,9 +19,11 @@ ModelExecutor::ModelExecutor(const ds::hf::DeepSeekConfig& cfg, ds::hf::LoadedMo
     throw std::runtime_error("CUDA backend requested but this build has no CUDA support");
   }
 #endif
+#if DS_USE_CUDA
   if (run_cfg_.backend == BackendKind::CUDA) {
-    throw std::runtime_error("CUDA backend interface exists, but CUDA kernels are not implemented yet");
+    ds::rt::cuda::ensure_initialized();
   }
+#endif
 
   if (run_cfg_.max_seq == 0) run_cfg_.max_seq = static_cast<std::size_t>(cfg_.max_position_embeddings);
 
@@ -55,27 +58,27 @@ StepResult ModelExecutor::decode_next(std::int32_t token_id) {
     const auto& layer = registry_.layers()[layer_id];
 
     const auto ln_in = ds::hf::decode_to_f32(*layer.input_layernorm.weight);
-    ds::core::rmsnorm_f32(hidden.data(), ln_in.data(), hidden_size, cfg_.rms_norm_eps, norm.data());
+    rmsnorm_backend(run_cfg_.backend, hidden.data(), ln_in.data(), hidden_size, cfg_.rms_norm_eps, norm.data());
     std::fill(delta.begin(), delta.end(), 0.0f);
-    mla_decode_step_cpu(cfg_, layer.attention, norm.data(), pos_, &caches_[layer_id], delta.data());
+    mla_decode_step(cfg_, layer.attention, norm.data(), pos_, &caches_[layer_id], delta.data(), run_cfg_.backend);
     for (std::size_t i = 0; i < hidden_size; ++i) hidden[i] += delta[i];
 
     const auto ln_post = ds::hf::decode_to_f32(*layer.post_attention_layernorm.weight);
-    ds::core::rmsnorm_f32(hidden.data(), ln_post.data(), hidden_size, cfg_.rms_norm_eps, norm.data());
+    rmsnorm_backend(run_cfg_.backend, hidden.data(), ln_post.data(), hidden_size, cfg_.rms_norm_eps, norm.data());
     std::fill(delta.begin(), delta.end(), 0.0f);
     if (layer.kind == LayerKind::Dense) {
-      dense_mlp_step_cpu(layer.dense_mlp, norm.data(), hidden_size, delta.data());
+      dense_mlp_step(run_cfg_.backend, layer.dense_mlp, norm.data(), hidden_size, delta.data());
     } else {
-      moe_step_cpu(cfg_, layer.moe, norm.data(), hidden_size, delta.data());
+      moe_step(run_cfg_.backend, cfg_, layer.moe, norm.data(), hidden_size, delta.data());
     }
     for (std::size_t i = 0; i < hidden_size; ++i) hidden[i] += delta[i];
   }
 
   const auto final_ln = ds::hf::decode_to_f32(*registry_.global().final_norm);
-  ds::core::rmsnorm_f32(hidden.data(), final_ln.data(), hidden_size, cfg_.rms_norm_eps, norm.data());
+  rmsnorm_backend(run_cfg_.backend, hidden.data(), final_ln.data(), hidden_size, cfg_.rms_norm_eps, norm.data());
 
   StepResult out;
-  lm_head_logits_cpu(*registry_.global().lm_head, norm.data(), &out.logits);
+  lm_head_logits(run_cfg_.backend, *registry_.global().lm_head, norm.data(), &out.logits);
   out.greedy_token_id = static_cast<std::int32_t>(ds::core::argmax_f32(out.logits.data(), out.logits.size()));
   ++pos_;
   return out;

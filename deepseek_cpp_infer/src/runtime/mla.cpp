@@ -39,8 +39,8 @@ const float* MLACache::val_ptr(std::size_t pos, std::size_t head) const {
   return v.data() + ((pos * n_heads + head) * v_head_dim);
 }
 
-void mla_decode_step_cpu(const ds::hf::DeepSeekConfig& cfg, const AttentionWeights& attn, const float* hidden,
-                         std::size_t pos, MLACache* cache, float* out_hidden) {
+void mla_decode_step(const ds::hf::DeepSeekConfig& cfg, const AttentionWeights& attn, const float* hidden,
+                     std::size_t pos, MLACache* cache, float* out_hidden, BackendKind backend) {
   if (cache == nullptr) throw std::runtime_error("mla: cache is null");
   if (pos >= cache->max_seq) throw std::runtime_error("mla: position out of range");
 
@@ -62,25 +62,25 @@ void mla_decode_step_cpu(const ds::hf::DeepSeekConfig& cfg, const AttentionWeigh
     const auto q_rank = static_cast<std::size_t>(attn.q_a_proj.weight->shape[0]);
     std::vector<float> q_a(q_rank, 0.0f);
     std::vector<float> q_a_norm(q_rank, 0.0f);
-    linear(attn.q_a_proj, hidden, hidden_size, q_a.data(), q_rank);
+    linear_backend(backend, attn.q_a_proj, hidden, hidden_size, q_a.data(), q_rank);
     const auto q_ln = ds::hf::decode_to_f32(*attn.q_a_layernorm.weight);
-    ds::core::rmsnorm_f32(q_a.data(), q_ln.data(), q_rank, cfg.rms_norm_eps, q_a_norm.data());
-    linear(attn.q_b_proj, q_a_norm.data(), q_rank, q_full.data(), n_heads * q_head);
+    rmsnorm_backend(backend, q_a.data(), q_ln.data(), q_rank, cfg.rms_norm_eps, q_a_norm.data());
+    linear_backend(backend, attn.q_b_proj, q_a_norm.data(), q_rank, q_full.data(), n_heads * q_head);
   } else {
-    linear(attn.q_proj, hidden, hidden_size, q_full.data(), n_heads * q_head);
+    linear_backend(backend, attn.q_proj, hidden, hidden_size, q_full.data(), n_heads * q_head);
   }
 
   std::vector<float> kv_a(kv_rank + qk_rope, 0.0f);
-  linear(attn.kv_a_proj_with_mqa, hidden, hidden_size, kv_a.data(), kv_rank + qk_rope);
+  linear_backend(backend, attn.kv_a_proj_with_mqa, hidden, hidden_size, kv_a.data(), kv_rank + qk_rope);
 
   std::vector<float> kv_norm(kv_rank, 0.0f);
   std::vector<float> kv_compressed(kv_rank, 0.0f);
   std::copy(kv_a.begin(), kv_a.begin() + static_cast<std::ptrdiff_t>(kv_rank), kv_compressed.begin());
   const auto kv_ln = ds::hf::decode_to_f32(*attn.kv_a_layernorm.weight);
-  ds::core::rmsnorm_f32(kv_compressed.data(), kv_ln.data(), kv_rank, cfg.rms_norm_eps, kv_norm.data());
+  rmsnorm_backend(backend, kv_compressed.data(), kv_ln.data(), kv_rank, cfg.rms_norm_eps, kv_norm.data());
 
   std::vector<float> kv_b(n_heads * (qk_nope + v_head), 0.0f);
-  linear(attn.kv_b_proj, kv_norm.data(), kv_rank, kv_b.data(), n_heads * (qk_nope + v_head));
+  linear_backend(backend, attn.kv_b_proj, kv_norm.data(), kv_rank, kv_b.data(), n_heads * (qk_nope + v_head));
 
   std::vector<float> shared_k_rope(qk_rope, 0.0f);
   std::copy(kv_a.begin() + static_cast<std::ptrdiff_t>(kv_rank), kv_a.end(), shared_k_rope.begin());
@@ -118,7 +118,7 @@ void mla_decode_step_cpu(const ds::hf::DeepSeekConfig& cfg, const AttentionWeigh
     }
   }
 
-  linear(attn.o_proj, attn_out.data(), n_heads * v_head, out_hidden, hidden_size);
+  linear_backend(backend, attn.o_proj, attn_out.data(), n_heads * v_head, out_hidden, hidden_size);
 }
 
 } // namespace ds::rt
