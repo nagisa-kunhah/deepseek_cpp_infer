@@ -46,6 +46,9 @@ add_executable(ds_chat
   src/hf/decode.cpp
   src/hf/weight_ops.cpp
   src/runtime/backend.cpp
+  src/runtime/model.cpp
+  src/runtime/model_factory.cpp
+  src/runtime/deepseek_model.cpp
   src/runtime/weights.cpp
   src/runtime/tokenizer.cpp
   src/runtime/ops.cpp
@@ -70,16 +73,27 @@ add_executable(ds_tests
   src/util/fs.cpp
   src/util/json.cpp
   src/util/mmap.cpp
+  src/util/path.cpp
   src/core/dtype.cpp
   src/core/math.cpp
   src/core/ops.cpp
   src/core/rope.cpp
+  src/core/sampler.cpp
   src/hf/decode.cpp
   src/hf/safetensors.cpp
+  src/hf/config.cpp
+  src/hf/model_loader.cpp
+  src/hf/weight_ops.cpp
+  src/hf/weights_index.cpp
   src/runtime/weights.cpp
+  src/runtime/backend.cpp
+  src/runtime/model.cpp
+  src/runtime/model_factory.cpp
+  src/runtime/deepseek_model.cpp
   src/runtime/tokenizer.cpp
   src/runtime/ops.cpp
   src/runtime/mla.cpp
+  src/runtime/model_executor.cpp
 )
 
 target_include_directories(ds_tests PRIVATE include)
@@ -97,6 +111,7 @@ if(DS_USE_CUDA)
     src/util/fs.cpp
     src/util/json.cpp
     src/util/mmap.cpp
+    src/util/path.cpp
     src/core/dtype.cpp
     src/core/math.cpp
     src/core/ops.cpp
@@ -104,8 +119,14 @@ if(DS_USE_CUDA)
     src/core/sampler.cpp
     src/hf/decode.cpp
     src/hf/safetensors.cpp
+    src/hf/config.cpp
+    src/hf/model_loader.cpp
+    src/hf/weights_index.cpp
     src/hf/weight_ops.cpp
     src/runtime/backend.cpp
+    src/runtime/model.cpp
+    src/runtime/model_factory.cpp
+    src/runtime/deepseek_model.cpp
     src/runtime/weights.cpp
     src/runtime/tokenizer.cpp
     src/runtime/ops.cpp

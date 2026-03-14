@@ -3,7 +3,8 @@
 #include "ds/hf/safetensors.h"
 #include "ds/hf/weights_index.h"
 #include "ds/runtime/backend.h"
-#include "ds/runtime/model_executor.h"
+#include "ds/runtime/model.h"
+#include "ds/runtime/model_factory.h"
 #include "ds/runtime/tokenizer.h"
 #include "ds/runtime/weights.h"
 #include "ds/util/path.h"
@@ -188,7 +189,7 @@ int main(int argc, char** argv) {
         std::cout << "Sample tensor: " << it->second.name << " bytes=" << it->second.nbytes << " shard=" << it->second.shard_path << "\n";
       }
 
-      const auto registry = ds::rt::WeightRegistry::from_model(cfg, m);
+      const auto registry = ds::rt::DeepSeekWeightRegistry::from_model(cfg, m);
       std::cout << "Layer registry:\n";
       for (std::size_t i = 0; i < registry.layers().size(); ++i) {
         std::cout << "  layer " << i << ": " << ds::rt::layer_kind_name(registry.layers()[i].kind) << "\n";
@@ -203,18 +204,16 @@ int main(int argc, char** argv) {
       const auto prompt_ids = resolve_prompt_ids(opts, tok_json, has_tokenizer, &tokenizer);
       if (prompt_ids.empty()) throw std::runtime_error("prompt resolved to zero token ids");
 
-      auto model = ds::hf::load_model_dir(model_dir);
+      auto runtime_model = ds::rt::load_model(model_dir);
       if (has_tokenizer && tokenizer.empty()) tokenizer = ds::rt::Tokenizer::load_from_file(tok_json);
-      ds::rt::ModelExecutor executor(
-          cfg, std::move(model),
-          ds::rt::RunConfig{
-              .backend = ds::rt::parse_backend_kind(opts.backend),
-              .max_seq = static_cast<std::size_t>(cfg.max_position_embeddings),
-              .verbose = false,
-          });
+      auto session = runtime_model->create_session(ds::rt::RunConfig{
+          .backend = ds::rt::parse_backend_kind(opts.backend),
+          .max_seq = static_cast<std::size_t>(cfg.max_position_embeddings),
+          .verbose = false,
+      });
 
       if (cmd == "run") {
-        const auto step = executor.prefill(prompt_ids);
+        const auto step = runtime_model->forward(*session, ds::rt::ForwardInput{prompt_ids});
         const auto next_id = step.greedy_token_id;
         std::cout << "Prompt tokens: " << prompt_ids.size() << "\n";
         std::cout << "Next token id: " << next_id << "\n";
@@ -233,7 +232,9 @@ int main(int argc, char** argv) {
           .seed = opts.seed,
       };
       std::vector<std::string> pieces;
-      const auto ids = executor.generate(prompt_ids, gen_cfg, has_tokenizer ? &tokenizer : nullptr, has_tokenizer ? &pieces : nullptr);
+      const auto ids =
+          ds::rt::generate(*runtime_model, *session, prompt_ids, gen_cfg, has_tokenizer ? &tokenizer : nullptr,
+                           has_tokenizer ? &pieces : nullptr);
       std::cout << "Generated ids:";
       for (auto id : ids) std::cout << " " << id;
       std::cout << "\n";

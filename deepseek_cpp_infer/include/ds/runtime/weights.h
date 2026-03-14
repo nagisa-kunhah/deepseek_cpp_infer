@@ -78,9 +78,9 @@ struct GlobalWeights {
   const ds::hf::TensorSlice* lm_head = nullptr;
 };
 
-class WeightRegistry {
+class DeepSeekWeightRegistry {
  public:
-  static WeightRegistry from_model(const ds::hf::DeepSeekConfig& cfg, const ds::hf::LoadedModel& model);
+  static DeepSeekWeightRegistry from_model(const ds::hf::DeepSeekConfig& cfg, const ds::hf::LoadedModel& model);
 
   const GlobalWeights& global() const { return global_; }
   const std::vector<DecoderLayerWeights>& layers() const { return layers_; }
@@ -89,6 +89,8 @@ class WeightRegistry {
   GlobalWeights global_;
   std::vector<DecoderLayerWeights> layers_;
 };
+
+using WeightRegistry = DeepSeekWeightRegistry;
 
 std::string layer_kind_name(LayerKind kind);
 
