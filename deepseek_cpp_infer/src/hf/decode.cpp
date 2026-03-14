@@ -56,4 +56,25 @@ std::vector<float> decode_to_f32(const TensorSlice& t) {
   return out;
 }
 
+std::vector<float> decode_rows_to_f32(const TensorSlice& t, std::size_t row0, std::size_t rows) {
+  if (t.shape.size() != 2) throw std::runtime_error("decode_rows: expected a 2D tensor");
+  const auto n_rows = static_cast<std::size_t>(t.shape[0]);
+  const auto n_cols = static_cast<std::size_t>(t.shape[1]);
+  if (row0 > n_rows || rows > (n_rows - row0)) throw std::runtime_error("decode_rows: row range out of bounds");
+
+  const auto elem = ds::hf::dtype_nbytes(t.dtype);
+  if (elem == 0) throw std::runtime_error("decode_rows: unknown dtype");
+  if (t.nbytes != n_rows * n_cols * elem) throw std::runtime_error("decode_rows: nbytes mismatch");
+
+  std::vector<float> out(rows * n_cols, 0.0f);
+  for (std::size_t r = 0; r < rows; ++r) {
+    const std::size_t src_base = (row0 + r) * n_cols;
+    const std::size_t dst_base = r * n_cols;
+    for (std::size_t c = 0; c < n_cols; ++c) {
+      out[dst_base + c] = read_scalar_f32(t, src_base + c);
+    }
+  }
+  return out;
+}
+
 } // namespace ds::hf

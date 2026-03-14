@@ -11,8 +11,10 @@ namespace ds::rt {
 
 struct NormWeights {
   const ds::hf::TensorSlice* weight = nullptr;
+  std::vector<float> f32;
 
   bool valid() const { return weight != nullptr; }
+  const float* data() const { return f32.data(); }
 };
 
 struct LinearWeights {
@@ -72,7 +74,7 @@ struct DecoderLayerWeights {
 
 struct GlobalWeights {
   const ds::hf::TensorSlice* embed_tokens = nullptr;
-  const ds::hf::TensorSlice* final_norm = nullptr;
+  NormWeights final_norm;
   const ds::hf::TensorSlice* lm_head = nullptr;
 };
 

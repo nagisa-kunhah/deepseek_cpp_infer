@@ -33,7 +33,8 @@
 - [x] Mmap weights (read-only) / lazy view layer (no tensor materialization)
 - [ ] Threading, batching
 - [x] CUDA bootstrap backend (`NVRTC + driver API`) for mock/small-model matvec + RMSNorm
-- [ ] Expand CUDA coverage to attention softmax/cache math and reduce CPU fallbacks
-- [ ] Replace bootstrap CUDA matvec kernels with cuBLAS/cuBLASLt hot paths
+- [x] Expand CUDA coverage to device-resident MLA cache math, softmax, and token-local MoE
+- [x] Replace bootstrap CUDA matvec kernels with cuBLAS GEMV hot paths
 - [ ] Blocked decode for large expert matrices
 - [ ] Full tokenizer parity with Hugging Face tokenizers
+- [ ] Real-model CUDA single-token latency is still too high on `RTX 4060 8GB`; keep reducing streaming overhead and kernel launch count

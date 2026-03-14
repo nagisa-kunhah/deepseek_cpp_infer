@@ -156,7 +156,7 @@ void test_mla_smoke() {
   ds::rt::AttentionWeights attn;
   attn.q_proj = {&q_proj_tensor, nullptr};
   attn.kv_a_proj_with_mqa = {&kv_a_tensor, nullptr};
-  attn.kv_a_layernorm = {&kv_a_ln_tensor};
+  attn.kv_a_layernorm = {&kv_a_ln_tensor, {1.0f, 1.0f}};
   attn.kv_b_proj = {&kv_b_tensor, nullptr};
   attn.o_proj = {&o_tensor, nullptr};
 
