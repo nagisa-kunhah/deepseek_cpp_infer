@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.22)
+cmake_minimum_required(VERSION 3.24)
 project(deepseek_cpp_infer LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 option(DS_USE_CUDA "Build with CUDA" ON)
-option(DS_DETECT_CUDA_ARCH "Detect CUDA architecture from the local GPU" ON)
+set(DS_CUDA_ARCHITECTURES "native" CACHE STRING "CUDA architectures for project CUDA targets")
 
 # Prefer an installed toolkit under /usr/local/cuda when available.
 if(DS_USE_CUDA)
@@ -22,22 +22,8 @@ if(DS_USE_CUDA)
   if(NOT CUDAToolkit_FOUND)
     message(WARNING "No usable CUDAToolkit found; building CPU-only. Reconfigure with -DDS_USE_CUDA=OFF to silence this.")
     set(DS_USE_CUDA OFF)
-  elseif(DS_DETECT_CUDA_ARCH)
-    find_program(DS_NVIDIA_SMI_EXECUTABLE nvidia-smi)
-    if(DS_NVIDIA_SMI_EXECUTABLE)
-      execute_process(
-        COMMAND ${DS_NVIDIA_SMI_EXECUTABLE} --query-gpu=compute_cap --format=csv,noheader
-        OUTPUT_VARIABLE DS_COMPUTE_CAP
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-      )
-      string(REGEX MATCH "^[0-9]+\\.[0-9]+" DS_COMPUTE_CAP "${DS_COMPUTE_CAP}")
-      if(DS_COMPUTE_CAP)
-        string(REPLACE "." "" DS_CUDA_ARCH "${DS_COMPUTE_CAP}")
-        set(CMAKE_CUDA_ARCHITECTURES "${DS_CUDA_ARCH}" CACHE STRING "CUDA architectures" FORCE)
-        message(STATUS "Detected CUDA architecture ${CMAKE_CUDA_ARCHITECTURES} from nvidia-smi")
-      endif()
-    endif()
+  else()
+    message(STATUS "Using CUDA architectures '${DS_CUDA_ARCHITECTURES}'")
   endif()
 endif()
 
@@ -88,7 +74,11 @@ target_include_directories(ds_chat PRIVATE include)
 
 if(DS_USE_CUDA)
   target_compile_definitions(ds_chat PRIVATE DS_USE_CUDA=1)
-  set_target_properties(ds_chat PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)
+  set_target_properties(ds_chat PROPERTIES
+    CUDA_STANDARD 17
+    CUDA_STANDARD_REQUIRED ON
+    CUDA_ARCHITECTURES "${DS_CUDA_ARCHITECTURES}"
+  )
   target_link_libraries(ds_chat PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::cublas CUDA::cublasLt)
 else()
   target_compile_definitions(ds_chat PRIVATE DS_USE_CUDA=0)
@@ -165,7 +155,11 @@ if(DS_USE_CUDA)
   )
   target_include_directories(ds_cuda_tests PRIVATE include)
   target_compile_definitions(ds_cuda_tests PRIVATE DS_USE_CUDA=1)
-  set_target_properties(ds_cuda_tests PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)
+  set_target_properties(ds_cuda_tests PROPERTIES
+    CUDA_STANDARD 17
+    CUDA_STANDARD_REQUIRED ON
+    CUDA_ARCHITECTURES "${DS_CUDA_ARCHITECTURES}"
+  )
   target_link_libraries(ds_cuda_tests PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::cublas CUDA::cublasLt)
   add_test(NAME ds_cuda_runtime_smoke COMMAND ds_cuda_tests)
   add_test(
