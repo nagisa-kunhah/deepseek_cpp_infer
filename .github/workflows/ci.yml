@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu-build-and-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deepseek_cpp_infer
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure CPU build
+        run: cmake -S . -B build -DDS_USE_CUDA=OFF
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

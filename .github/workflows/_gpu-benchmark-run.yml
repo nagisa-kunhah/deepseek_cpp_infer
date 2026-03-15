@@ -1,0 +1,303 @@
+name: gpu-benchmark-run
+
+on:
+  workflow_call:
+    inputs:
+      git_ref:
+        required: true
+        type: string
+      git_sha:
+        required: true
+        type: string
+      git_branch:
+        required: true
+        type: string
+      bench_case:
+        required: true
+        type: string
+      model_profile:
+        required: true
+        type: string
+      machine_type:
+        required: true
+        type: string
+      provisioning_model:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  gpu-benchmark:
+    runs-on: ubuntu-latest
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+      GCP_ZONE: ${{ vars.GCP_ZONE || 'us-central1-a' }}
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+      GCP_ARTIFACT_REGISTRY_REPOSITORY: ${{ vars.GCP_ARTIFACT_REGISTRY_REPOSITORY || 'deepseek-ci' }}
+      GCP_GCS_BENCH_BUCKET: ${{ vars.GCP_GCS_BENCH_BUCKET }}
+      GCP_VM_IMAGE_PROJECT: ${{ vars.GCP_VM_IMAGE_PROJECT || 'deeplearning-platform-release' }}
+      GCP_VM_IMAGE_FAMILY: ${{ vars.GCP_VM_IMAGE_FAMILY || 'common-cu124-ubuntu-2204-nvidia' }}
+      GCP_VM_SERVICE_ACCOUNT: ${{ vars.GCP_VM_SERVICE_ACCOUNT || vars.GCP_SERVICE_ACCOUNT }}
+      MODEL_GCS_URI: ${{ vars.MODEL_GCS_URI }}
+      PROJECT_DIR: deepseek_cpp_infer
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      GPU_TYPE: nvidia-l4
+      GPU_COUNT: "1"
+      BOOT_DISK_SIZE_GB: "100"
+    steps:
+      - name: Validate required configuration
+        run: |
+          set -euo pipefail
+          required=(
+            GCP_PROJECT_ID
+            GCP_WORKLOAD_IDENTITY_PROVIDER
+            GCP_SERVICE_ACCOUNT
+            GCP_GCS_BENCH_BUCKET
+          )
+          for key in "${required[@]}"; do
+            if [ -z "${!key:-}" ]; then
+              echo "Missing required repository variable: $key" >&2
+              exit 1
+            fi
+          done
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref }}
+          fetch-depth: 1
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Compute runtime variables
+        run: |
+          set -euo pipefail
+          resolved_sha="$(git rev-parse HEAD)"
+          resolved_branch="${{ inputs.git_branch }}"
+          short_sha="$(printf '%s' "${resolved_sha}" | cut -c1-12)"
+          instance_name="gpu-bench-${short_sha}-${GITHUB_RUN_ATTEMPT}"
+          image_uri="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GCP_ARTIFACT_REGISTRY_REPOSITORY}/deepseek-benchmark:${resolved_sha}"
+          result_prefix="gpu-benchmarks/${resolved_branch}/${resolved_sha}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          result_gcs_uri="gs://${GCP_GCS_BENCH_BUCKET}/${result_prefix}"
+          {
+            echo "RESOLVED_SHA=${resolved_sha}"
+            echo "RESOLVED_BRANCH=${resolved_branch}"
+            echo "INSTANCE_NAME=${instance_name}"
+            echo "IMAGE_URI=${image_uri}"
+            echo "RESULT_PREFIX=${result_prefix}"
+            echo "RESULT_GCS_URI=${result_gcs_uri}"
+            echo "STATUS_GCS_URI=${result_gcs_uri}/status.json"
+          } >> "$GITHUB_ENV"
+
+      - name: Build benchmark image
+        run: docker build -f "${PROJECT_DIR}/docker/benchmark.Dockerfile" -t "${IMAGE_URI}" "./${PROJECT_DIR}"
+
+      - name: Push benchmark image
+        run: docker push "${IMAGE_URI}"
+
+      - name: Resolve provisioning model flags
+        id: provisioning
+        run: |
+          set -euo pipefail
+          mode="$(printf '%s' '${{ inputs.provisioning_model }}' | tr '[:lower:]' '[:upper:]')"
+          if [ "$mode" = "SPOT" ]; then
+            {
+              echo "PROVISIONING_FLAGS=--provisioning-model=SPOT --instance-termination-action=DELETE"
+              echo "INSTANCE_PREEMPTIBLE=true"
+            } >> "$GITHUB_ENV"
+          else
+            {
+              echo "PROVISIONING_FLAGS="
+              echo "INSTANCE_PREEMPTIBLE=false"
+            } >> "$GITHUB_ENV"
+          fi
+
+      - name: Create ephemeral GPU VM
+        id: primary_create
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          gcloud compute instances create "${INSTANCE_NAME}" \
+            --project "${GCP_PROJECT_ID}" \
+            --zone "${GCP_ZONE}" \
+            --machine-type "${{ inputs.machine_type }}" \
+            --maintenance-policy TERMINATE \
+            --accelerator "type=${GPU_TYPE},count=${GPU_COUNT}" \
+            --boot-disk-size "${BOOT_DISK_SIZE_GB}GB" \
+            --service-account "${GCP_VM_SERVICE_ACCOUNT}" \
+            --scopes "https://www.googleapis.com/auth/cloud-platform" \
+            --image-project "${GCP_VM_IMAGE_PROJECT}" \
+            --image-family "${GCP_VM_IMAGE_FAMILY}" \
+            --metadata-from-file startup-script="${PROJECT_DIR}/scripts/gcp/gpu_benchmark_startup.sh" \
+            --metadata \
+              docker_image="${IMAGE_URI}",\
+              bench_case="${{ inputs.bench_case }}",\
+              git_sha="${RESOLVED_SHA}",\
+              git_branch="${RESOLVED_BRANCH}",\
+              machine_type="${{ inputs.machine_type }}",\
+              gpu_type="${GPU_TYPE}",\
+              model_profile="${{ inputs.model_profile }}",\
+              result_gcs_uri="${RESULT_GCS_URI}",\
+              model_gcs_uri="${MODEL_GCS_URI}",\
+              hf_token="${HF_TOKEN}",\
+              project_dir="${PROJECT_DIR}" \
+            ${PROVISIONING_FLAGS}
+
+      - name: Wait for benchmark completion
+        id: primary_wait
+        if: steps.primary_create.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 35
+        run: |
+          set -euo pipefail
+          attempts=0
+          until gcloud storage ls "${STATUS_GCS_URI}" >/dev/null 2>&1; do
+            attempts=$((attempts + 1))
+            if [ "$attempts" -ge 70 ]; then
+              echo "Timed out waiting for ${STATUS_GCS_URI}" >&2
+              exit 1
+            fi
+            sleep 30
+          done
+          mkdir -p artifacts
+          gcloud storage cp "${STATUS_GCS_URI}" artifacts/status.json
+          for name in perf.json report.md raw.log host.log; do
+            if gcloud storage ls "${RESULT_GCS_URI}/${name}" >/dev/null 2>&1; then
+              gcloud storage cp "${RESULT_GCS_URI}/${name}" "artifacts/${name}"
+            fi
+          done
+
+      - name: Delete failed spot VM before retry
+        if: >
+          inputs.provisioning_model == 'spot' &&
+          (steps.primary_create.outcome == 'failure' || steps.primary_wait.outcome == 'failure')
+        run: |
+          set -euo pipefail
+          gcloud compute instances delete "${INSTANCE_NAME}" \
+            --project "${GCP_PROJECT_ID}" \
+            --zone "${GCP_ZONE}" \
+            --quiet || true
+
+      - name: Retry with on-demand VM
+        id: fallback_create
+        if: >
+          inputs.provisioning_model == 'spot' &&
+          (steps.primary_create.outcome == 'failure' || steps.primary_wait.outcome == 'failure')
+        run: |
+          set -euo pipefail
+          echo "FALLBACK_USED=true" >> "$GITHUB_ENV"
+          gcloud compute instances create "${INSTANCE_NAME}" \
+            --project "${GCP_PROJECT_ID}" \
+            --zone "${GCP_ZONE}" \
+            --machine-type "${{ inputs.machine_type }}" \
+            --maintenance-policy TERMINATE \
+            --accelerator "type=${GPU_TYPE},count=${GPU_COUNT}" \
+            --boot-disk-size "${BOOT_DISK_SIZE_GB}GB" \
+            --service-account "${GCP_VM_SERVICE_ACCOUNT}" \
+            --scopes "https://www.googleapis.com/auth/cloud-platform" \
+            --image-project "${GCP_VM_IMAGE_PROJECT}" \
+            --image-family "${GCP_VM_IMAGE_FAMILY}" \
+            --metadata-from-file startup-script="${PROJECT_DIR}/scripts/gcp/gpu_benchmark_startup.sh" \
+            --metadata \
+              docker_image="${IMAGE_URI}",\
+              bench_case="${{ inputs.bench_case }}",\
+              git_sha="${RESOLVED_SHA}",\
+              git_branch="${RESOLVED_BRANCH}",\
+              machine_type="${{ inputs.machine_type }}",\
+              gpu_type="${GPU_TYPE}",\
+              model_profile="${{ inputs.model_profile }}",\
+              result_gcs_uri="${RESULT_GCS_URI}",\
+              model_gcs_uri="${MODEL_GCS_URI}",\
+              hf_token="${HF_TOKEN}",\
+              project_dir="${PROJECT_DIR}"
+
+      - name: Wait for on-demand fallback completion
+        id: fallback_wait
+        if: steps.fallback_create.outcome == 'success'
+        timeout-minutes: 35
+        run: |
+          set -euo pipefail
+          attempts=0
+          until gcloud storage ls "${STATUS_GCS_URI}" >/dev/null 2>&1; do
+            attempts=$((attempts + 1))
+            if [ "$attempts" -ge 70 ]; then
+              echo "Timed out waiting for ${STATUS_GCS_URI}" >&2
+              exit 1
+            fi
+            sleep 30
+          done
+          mkdir -p artifacts
+          gcloud storage cp "${STATUS_GCS_URI}" artifacts/status.json
+          for name in perf.json report.md raw.log host.log; do
+            if gcloud storage ls "${RESULT_GCS_URI}/${name}" >/dev/null 2>&1; then
+              gcloud storage cp "${RESULT_GCS_URI}/${name}" "artifacts/${name}"
+            fi
+          done
+
+      - name: Publish benchmark summary
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ "${FALLBACK_USED:-false}" = "true" ]; then
+            echo "> Spot run failed; this result is from the on-demand retry." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f artifacts/report.md ]; then
+            cat artifacts/report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Benchmark report was not produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f artifacts/status.json ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat artifacts/status.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-benchmark-${{ inputs.bench_case }}-${{ github.run_id }}
+          path: artifacts
+          if-no-files-found: warn
+
+      - name: Enforce benchmark success
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -f artifacts/status.json ]; then
+            echo "Missing status.json from remote benchmark" >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          status = json.loads(Path("artifacts/status.json").read_text())
+          if status.get("status") != "success":
+              raise SystemExit(f"Remote benchmark failed: {status}")
+          PY
+
+      - name: Delete ephemeral GPU VM
+        if: always()
+        run: |
+          set -euo pipefail
+          gcloud compute instances delete "${INSTANCE_NAME}" \
+            --project "${GCP_PROJECT_ID}" \
+            --zone "${GCP_ZONE}" \
+            --quiet || true

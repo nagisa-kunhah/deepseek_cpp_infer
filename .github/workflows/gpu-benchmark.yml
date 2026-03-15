@@ -1,0 +1,77 @@
+name: gpu-benchmark
+
+on:
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: Git ref or SHA to benchmark
+        required: false
+        default: main
+        type: string
+      bench_case:
+        description: Benchmark case
+        required: true
+        default: gpu_smoke
+        type: choice
+        options:
+          - gpu_smoke
+          - real_benchmark
+      model_profile:
+        description: Model profile
+        required: true
+        default: mock
+        type: choice
+        options:
+          - mock
+          - deepseek_v2_lite_chat
+      machine_type:
+        description: GCP machine type
+        required: true
+        default: g2-standard-4
+        type: string
+      provisioning_model:
+        description: Provisioning model
+        required: true
+        default: spot
+        type: choice
+        options:
+          - spot
+          - ondemand
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  benchmark-main-push:
+    if: >
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+    uses: ./.github/workflows/_gpu-benchmark-run.yml
+    with:
+      git_ref: ${{ github.event.workflow_run.head_sha }}
+      git_sha: ${{ github.event.workflow_run.head_sha }}
+      git_branch: ${{ github.event.workflow_run.head_branch }}
+      bench_case: gpu_smoke
+      model_profile: mock
+      machine_type: g2-standard-4
+      provisioning_model: spot
+    secrets: inherit
+
+  benchmark-manual:
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/_gpu-benchmark-run.yml
+    with:
+      git_ref: ${{ inputs.git_ref }}
+      git_sha: ${{ inputs.git_ref }}
+      git_branch: ${{ inputs.git_ref }}
+      bench_case: ${{ inputs.bench_case }}
+      model_profile: ${{ inputs.model_profile }}
+      machine_type: ${{ inputs.machine_type }}
+      provisioning_model: ${{ inputs.provisioning_model }}
+    secrets: inherit

@@ -76,3 +76,4 @@ Architecture and implementation notes:
 - `docs/runtime_design.md`
 - `docs/implementation_plan.md`
 - `docs/gpu_phase1_retrospective.md`
+- `docs/gpu_benchmark_ci.md`

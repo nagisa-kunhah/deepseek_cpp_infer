@@ -18,3 +18,5 @@ Makefile
 *.dll
 *.dylib
 *.exe
+__pycache__/
+*.pyc
