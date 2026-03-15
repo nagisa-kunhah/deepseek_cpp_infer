@@ -13,14 +13,8 @@ namespace ds::rt {
 
 class Tokenizer;
 
-enum class ModelFamily {
-  DeepSeek,
-};
-
-std::string to_string(ModelFamily family);
-
 struct ModelInfo {
-  ModelFamily family = ModelFamily::DeepSeek;
+  std::string family_id;
   std::string model_type;
   std::int32_t vocab_size = 0;
   std::int32_t max_position_embeddings = 0;

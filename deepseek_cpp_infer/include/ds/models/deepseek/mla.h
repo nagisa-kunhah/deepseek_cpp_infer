@@ -1,8 +1,8 @@
 #pragma once
 
-#include "ds/hf/config.h"
+#include "ds/models/deepseek/config.h"
+#include "ds/models/deepseek/weights.h"
 #include "ds/runtime/backend.h"
-#include "ds/runtime/weights.h"
 
 #include <cstddef>
 #include <vector>

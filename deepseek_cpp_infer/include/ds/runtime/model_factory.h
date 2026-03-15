@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ds/hf/config.h"
 #include "ds/runtime/model.h"
 
 #include <memory>
@@ -7,7 +8,6 @@
 
 namespace ds::rt {
 
-ModelFamily detect_model_family(const std::string& model_type);
-std::unique_ptr<Model> load_model(const std::string& model_dir);
+std::shared_ptr<const Model> load_model(const std::string& model_dir);
 
 } // namespace ds::rt
