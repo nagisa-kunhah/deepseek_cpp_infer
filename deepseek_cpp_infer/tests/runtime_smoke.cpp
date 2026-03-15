@@ -1,17 +1,19 @@
 #include "ds/core/math.h"
 #include "ds/hf/config.h"
-#include "ds/runtime/deepseek_model.h"
-#include "ds/runtime/mla.h"
+#include "ds/models/core/registry.h"
+#include "ds/models/deepseek/config.h"
+#include "ds/models/deepseek/model.h"
+#include "ds/models/deepseek/mla.h"
+#include "ds/models/deepseek/ops.h"
+#include "ds/models/deepseek/weights.h"
 #include "ds/runtime/model_executor.h"
-#include "ds/runtime/model_factory.h"
-#include "ds/runtime/ops.h"
 #include "ds/runtime/tokenizer.h"
-#include "ds/runtime/weights.h"
 
 #include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -55,6 +57,54 @@ ds::hf::DeepSeekConfig make_cfg() {
   cfg.norm_topk_prob = true;
   return cfg;
 }
+
+class FakeSession : public ds::rt::ModelSession {
+ public:
+  void reset() override { pos_ = 0; }
+  std::size_t position() const override { return pos_; }
+
+  std::size_t pos_ = 0;
+};
+
+class FakeModel : public ds::rt::Model {
+ public:
+  FakeModel() {
+    info_.family_id = "fake";
+    info_.model_type = "fake_unit_test";
+    info_.vocab_size = 4;
+    info_.max_position_embeddings = 16;
+    info_.supported_backends.push_back(ds::rt::BackendKind::CPU);
+  }
+
+  const ds::rt::ModelInfo& info() const override { return info_; }
+
+  std::unique_ptr<ds::rt::ModelSession> create_session(const ds::rt::RunConfig&) const override {
+    return std::make_unique<FakeSession>();
+  }
+
+  ds::rt::ForwardOutput forward(ds::rt::ModelSession& session, const ds::rt::ForwardInput& input) const override {
+    auto* fake = dynamic_cast<FakeSession*>(&session);
+    assert(fake != nullptr);
+    assert(!input.token_ids.empty());
+
+    fake->pos_ += input.token_ids.size();
+    const auto token = input.token_ids.back();
+    std::vector<float> logits = {
+        0.1f,
+        static_cast<float>(token),
+        static_cast<float>(token + 1),
+        static_cast<float>(token + 2),
+    };
+    return ds::rt::ForwardOutput{
+        .logits = std::move(logits),
+        .greedy_token_id = 3,
+        .position_after = fake->pos_,
+    };
+  }
+
+ private:
+  ds::rt::ModelInfo info_;
+};
 
 ds::hf::LoadedModel make_model() {
   static const float embed[32] = {
@@ -251,15 +301,36 @@ void test_mla_smoke() {
   for (float v : out) assert(std::isfinite(v));
 }
 
-void test_model_factory_detection() {
-  assert(ds::rt::detect_model_family("deepseek_v2") == ds::rt::ModelFamily::DeepSeek);
-  bool threw = false;
-  try {
-    (void)ds::rt::detect_model_family("llama");
-  } catch (const std::runtime_error&) {
-    threw = true;
-  }
-  assert(threw);
+void test_runtime_model_executor_is_generic() {
+  auto model = std::make_shared<const FakeModel>();
+  ds::rt::ModelExecutor executor(model, ds::rt::RunConfig{.backend = ds::rt::BackendKind::CPU, .max_seq = 16});
+
+  const auto prefill = executor.prefill({1, 2});
+  assert(prefill.greedy_token_id == 3);
+  assert(executor.position() == 2);
+
+  const auto next = executor.decode_next(3);
+  assert(next.greedy_token_id == 3);
+  assert(executor.position() == 3);
+
+  const auto generated = executor.generate({5}, ds::rt::GenerationConfig{
+                                                    .max_new_tokens = 2,
+                                                    .temperature = 0.7f,
+                                                    .top_k = 2,
+                                                    .top_p = 0.95f,
+                                                    .seed = 42,
+                                                });
+  assert(generated.size() == 2);
+  assert(executor.position() == 5);
+
+  executor.reset();
+  assert(executor.position() == 0);
+}
+
+void test_package_registry_resolution() {
+  const auto cfg = ds::hf::load_config_json("/tmp/ds_runtime_model_package_config.json");
+  const auto& package = ds::models::core::resolve_package(cfg);
+  assert(std::string(package.package_id) == "deepseek");
 }
 
 void test_deepseek_session_independence() {
@@ -288,10 +359,11 @@ void test_deepseek_session_independence() {
 void test_executor_shim_matches_model() {
   auto cfg = make_cfg();
 
+  auto shared_model = std::make_shared<const ds::rt::DeepSeekModel>(cfg, make_model());
   ds::rt::DeepSeekModel model(cfg, make_model());
   auto session = model.create_session(ds::rt::RunConfig{.backend = ds::rt::BackendKind::CPU, .max_seq = 8});
 
-  ds::rt::ModelExecutor executor(cfg, make_model(), ds::rt::RunConfig{.backend = ds::rt::BackendKind::CPU, .max_seq = 8});
+  ds::rt::ModelExecutor executor(shared_model, ds::rt::RunConfig{.backend = ds::rt::BackendKind::CPU, .max_seq = 8});
 
   const auto direct = model.forward(*session, ds::rt::ForwardInput{{0}});
   const auto shim = executor.prefill({0});
@@ -303,11 +375,16 @@ void test_executor_shim_matches_model() {
 } // namespace
 
 int main() {
+  {
+    std::ofstream f("/tmp/ds_runtime_model_package_config.json");
+    f << R"({"model_type":"deepseek_v2","hidden_size":4,"num_hidden_layers":2,"vocab_size":8})";
+  }
   test_tokenizer();
+  test_runtime_model_executor_is_generic();
   test_deepseek_weight_registry();
   test_mla_smoke();
-  test_model_factory_detection();
   test_deepseek_session_independence();
   test_executor_shim_matches_model();
+  test_package_registry_resolution();
   return 0;
 }

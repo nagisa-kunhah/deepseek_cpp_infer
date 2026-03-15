@@ -2,16 +2,7 @@
 
 #include "ds/runtime/tokenizer.h"
 
-#include <stdexcept>
-
 namespace ds::rt {
-
-std::string to_string(ModelFamily family) {
-  switch (family) {
-    case ModelFamily::DeepSeek: return "deepseek";
-  }
-  return "unknown";
-}
 
 bool ModelInfo::supports_backend(BackendKind backend) const {
   for (auto supported : supported_backends) {

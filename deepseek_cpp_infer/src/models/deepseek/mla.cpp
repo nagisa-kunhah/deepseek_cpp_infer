@@ -1,9 +1,9 @@
-#include "ds/runtime/mla.h"
+#include "ds/models/deepseek/mla.h"
 
 #include "ds/core/math.h"
 #include "ds/core/ops.h"
 #include "ds/core/rope.h"
-#include "ds/runtime/ops.h"
+#include "ds/models/deepseek/ops.h"
 
 #include <algorithm>
 #include <cmath>

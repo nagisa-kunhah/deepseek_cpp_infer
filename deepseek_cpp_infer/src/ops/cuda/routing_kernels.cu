@@ -1,4 +1,4 @@
-#include "ds/runtime/cuda_kernels.h"
+#include "ds/models/deepseek/cuda_kernels.h"
 
 #if DS_USE_CUDA
 

@@ -1,11 +1,12 @@
 #include "ds/core/math.h"
-#include "ds/hf/config.h"
-#include "ds/runtime/deepseek_model.h"
+#include "ds/models/deepseek/config.h"
+#include "ds/models/deepseek/model.h"
 #include "ds/runtime/model_executor.h"
 
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -217,7 +218,8 @@ void test_executor_shim_matches_new_cuda_path() {
   ds::rt::DeepSeekModel model(cfg, make_model());
   auto session = model.create_session(ds::rt::RunConfig{.backend = ds::rt::BackendKind::CUDA, .max_seq = 8});
 
-  ds::rt::ModelExecutor executor(cfg, make_model(), ds::rt::RunConfig{.backend = ds::rt::BackendKind::CUDA, .max_seq = 8});
+  auto shared_model = std::make_shared<const ds::rt::DeepSeekModel>(cfg, make_model());
+  ds::rt::ModelExecutor executor(shared_model, ds::rt::RunConfig{.backend = ds::rt::BackendKind::CUDA, .max_seq = 8});
 
   const auto direct = model.forward(*session, ds::rt::ForwardInput{{0}});
   const auto shim = executor.prefill({0});
