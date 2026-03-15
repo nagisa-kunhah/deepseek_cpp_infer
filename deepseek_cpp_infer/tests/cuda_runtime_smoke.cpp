@@ -1,5 +1,6 @@
 #include "ds/core/math.h"
 #include "ds/hf/config.h"
+#include "ds/runtime/deepseek_model.h"
 #include "ds/runtime/model_executor.h"
 
 #include <cassert>
@@ -24,6 +25,7 @@ ds::hf::TensorSlice make_tensor(const std::string& name, const std::vector<std::
 
 ds::hf::DeepSeekConfig make_cfg() {
   ds::hf::DeepSeekConfig cfg;
+  cfg.model_type = "deepseek_v2";
   cfg.hidden_size = 4;
   cfg.num_hidden_layers = 2;
   cfg.num_attention_heads = 2;
@@ -149,29 +151,86 @@ void assert_close(const std::vector<float>& a, const std::vector<float>& b, floa
   }
 }
 
-void test_cuda_executor_matches_cpu() {
+void test_cuda_model_matches_cpu() {
   auto cfg = make_cfg();
-  auto cpu_model = make_model();
-  auto cuda_model = make_model();
+  ds::rt::DeepSeekModel cpu_model(cfg, make_model());
+  ds::rt::DeepSeekModel cuda_model(cfg, make_model());
 
-  ds::rt::ModelExecutor cpu_exec(cfg, std::move(cpu_model), ds::rt::RunConfig{.backend = ds::rt::BackendKind::CPU, .max_seq = 8});
-  ds::rt::ModelExecutor cuda_exec(cfg, std::move(cuda_model), ds::rt::RunConfig{.backend = ds::rt::BackendKind::CUDA, .max_seq = 8});
+  auto cpu_session = cpu_model.create_session(ds::rt::RunConfig{.backend = ds::rt::BackendKind::CPU, .max_seq = 8});
+  auto cuda_session = cuda_model.create_session(ds::rt::RunConfig{.backend = ds::rt::BackendKind::CUDA, .max_seq = 8});
 
-  const auto cpu_step = cpu_exec.prefill({0});
-  const auto cuda_step = cuda_exec.prefill({0});
+  const auto cpu_step = cpu_model.forward(*cpu_session, ds::rt::ForwardInput{{0}});
+  const auto cuda_step = cuda_model.forward(*cuda_session, ds::rt::ForwardInput{{0}});
 
   assert(cpu_step.greedy_token_id == cuda_step.greedy_token_id);
   assert_close(cpu_step.logits, cuda_step.logits, 1e-3f);
 
-  const auto& stats = cuda_exec.cuda_stats();
+  const auto* deepseek_cuda_session = dynamic_cast<const ds::rt::DeepSeekSession*>(cuda_session.get());
+  assert(deepseek_cuda_session != nullptr);
+  const auto& stats = deepseek_cuda_session->cuda_stats();
+  assert(stats.embedding_cuda_hits > 0);
   assert(stats.linear_cuda_hits > 0);
   assert(stats.mla_cuda_hits > 0);
   assert(stats.moe_cuda_hits > 0);
+  assert(stats.cached_weight_hits > 0);
+  assert(stats.stream_linear_fallbacks == 0);
+}
+
+void test_large_weight_preload_avoids_streaming_fallback() {
+  ds::rt::cuda::ensure_initialized();
+  ds::rt::cuda::reset_stats();
+
+  ds::hf::DeepSeekConfig dummy_cfg;
+  auto* state = ds::rt::cuda::create_executor_state(dummy_cfg, 1, 0);
+
+  const std::size_t in = 1024;
+  const std::size_t out = 8193;
+  std::vector<float> weight(out * in, 0.0f);
+  std::vector<float> input(in, 1.0f);
+  std::vector<float> output(out, 0.0f);
+  for (std::size_t row = 0; row < out; ++row) {
+    weight[row * in] = 1.0f;
+  }
+
+  const auto tensor = make_tensor("large_linear", {static_cast<std::int64_t>(out), static_cast<std::int64_t>(in)},
+                                  weight.data(), weight.size() * sizeof(float));
+
+  assert(ds::rt::cuda::preload_tensor(tensor));
+  assert(ds::rt::cuda::upload_to_slot(state, ds::rt::cuda::DeviceBufferSlot::Hidden, input.data(), in));
+  assert(ds::rt::cuda::linear_to_slot(state, tensor, ds::rt::cuda::DeviceBufferSlot::Hidden, in,
+                                      ds::rt::cuda::DeviceBufferSlot::Delta, out));
+  assert(ds::rt::cuda::download_from_slot(state, ds::rt::cuda::DeviceBufferSlot::Delta, output.data(), out));
+
+  for (float value : output) assert(std::fabs(value - 1.0f) <= 1e-4f);
+
+  const auto& stats = ds::rt::cuda::stats();
+  assert(stats.linear_cuda_hits == 1);
+  assert(stats.cached_weight_uploads > 0);
+  assert(stats.cached_weight_bytes >= weight.size() * sizeof(float));
+  assert(stats.stream_linear_fallbacks == 0);
+
+  ds::rt::cuda::destroy_executor_state(state);
+}
+
+void test_executor_shim_matches_new_cuda_path() {
+  auto cfg = make_cfg();
+  ds::rt::DeepSeekModel model(cfg, make_model());
+  auto session = model.create_session(ds::rt::RunConfig{.backend = ds::rt::BackendKind::CUDA, .max_seq = 8});
+
+  ds::rt::ModelExecutor executor(cfg, make_model(), ds::rt::RunConfig{.backend = ds::rt::BackendKind::CUDA, .max_seq = 8});
+
+  const auto direct = model.forward(*session, ds::rt::ForwardInput{{0}});
+  const auto shim = executor.prefill({0});
+
+  assert(direct.greedy_token_id == shim.greedy_token_id);
+  assert_close(direct.logits, shim.logits, 1e-3f);
 }
 
 } // namespace
 
 int main() {
-  test_cuda_executor_matches_cpu();
+  test_cuda_model_matches_cpu();
+  test_large_weight_preload_avoids_streaming_fallback();
+  test_executor_shim_matches_new_cuda_path();
   return 0;
 }

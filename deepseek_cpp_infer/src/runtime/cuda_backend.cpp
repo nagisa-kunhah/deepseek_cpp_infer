@@ -1,4 +1,5 @@
 #include "ds/runtime/cuda_backend.h"
+#include "ds/runtime/cuda_kernels.h"
 
 #include <stdexcept>
 
@@ -9,7 +10,6 @@
 
 #include <cublas_v2.h>
 #include <cuda.h>
-#include <nvrtc.h>
 
 #include <algorithm>
 #include <array>
@@ -26,136 +26,8 @@
 namespace ds::rt::cuda {
 namespace {
 
-constexpr std::size_t kWeightCacheThresholdBytes = 32ull << 20;
 constexpr std::size_t kStreamWeightChunkBytes = 16ull << 20;
 constexpr int kThreads = 256;
-
-const char* kKernelSource = R"CUDA(
-extern "C" __global__ void ds_rmsnorm_kernel(const float* x, const float* w, int n, float eps, float* y) {
-  __shared__ float partial[256];
-  int tid = threadIdx.x;
-  float local = 0.0f;
-  for (int i = tid; i < n; i += blockDim.x) local += x[i] * x[i];
-  partial[tid] = local;
-  __syncthreads();
-
-  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-    if (tid < stride) partial[tid] += partial[tid + stride];
-    __syncthreads();
-  }
-
-  float inv = rsqrtf(partial[0] / (float)n + eps);
-  for (int i = tid; i < n; i += blockDim.x) y[i] = x[i] * inv * w[i];
-}
-
-extern "C" __global__ void ds_add_inplace_kernel(float* dst, const float* src, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) dst[i] += src[i];
-}
-
-extern "C" __global__ void ds_scale_add_kernel(float* dst, const float* src, float scale, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) dst[i] += scale * src[i];
-}
-
-extern "C" __global__ void ds_silu_mul_kernel(float* gate, const float* up, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= n) return;
-  float x = gate[i];
-  gate[i] = (x / (1.0f + expf(-x))) * up[i];
-}
-
-extern "C" __global__ void ds_rope_inplace_kernel(float* x, int dim, int pos, float theta) {
-  int pair = blockIdx.x * blockDim.x + threadIdx.x;
-  int half = dim / 2;
-  if (pair >= half) return;
-  int i0 = pair * 2;
-  int i1 = i0 + 1;
-  float freq = powf(theta, -((float)i0 / (float)dim));
-  float angle = (float)pos * freq;
-  float c = cosf(angle);
-  float s = sinf(angle);
-  float a = x[i0];
-  float b = x[i1];
-  x[i0] = a * c - b * s;
-  x[i1] = a * s + b * c;
-}
-
-extern "C" __global__ void ds_scores_kernel(const float* q, const float* k_base, int q_head, int seq_len,
-                                             int key_stride, float scale, float* scores) {
-  int t = blockIdx.x * blockDim.x + threadIdx.x;
-  if (t >= seq_len) return;
-  const float* k = k_base + t * key_stride;
-  float acc = 0.0f;
-  for (int i = 0; i < q_head; ++i) acc += q[i] * k[i];
-  scores[t] = acc * scale;
-}
-
-extern "C" __global__ void ds_softmax_kernel(float* x, int n) {
-  __shared__ float smax;
-  __shared__ float ssum;
-  if (threadIdx.x == 0) {
-    float m = x[0];
-    for (int i = 1; i < n; ++i) if (x[i] > m) m = x[i];
-    float sum = 0.0f;
-    for (int i = 0; i < n; ++i) {
-      x[i] = expf(x[i] - m);
-      sum += x[i];
-    }
-    smax = m;
-    ssum = sum;
-  }
-  __syncthreads();
-  float inv = ssum > 0.0f ? (1.0f / ssum) : 0.0f;
-  for (int i = threadIdx.x; i < n; i += blockDim.x) x[i] *= inv;
-}
-
-extern "C" __global__ void ds_weighted_sum_kernel(const float* scores, const float* v_base, int seq_len, int v_head,
-                                                   int v_stride, float* out) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= v_head) return;
-  float acc = 0.0f;
-  for (int t = 0; t < seq_len; ++t) acc += scores[t] * v_base[t * v_stride + i];
-  out[i] = acc;
-}
-
-extern "C" __global__ void ds_select_topk_kernel(const float* scores, int n, int topk, int normalize,
-                                                  float routed_scale, int* out_ids, float* out_probs) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  float best_scores[8];
-  int best_ids[8];
-  for (int i = 0; i < 8; ++i) {
-    best_scores[i] = -3.402823466e+38F;
-    best_ids[i] = 0;
-  }
-
-  for (int i = 0; i < n; ++i) {
-    float s = scores[i];
-    for (int j = 0; j < topk; ++j) {
-      if (s > best_scores[j]) {
-        for (int k = topk - 1; k > j; --k) {
-          best_scores[k] = best_scores[k - 1];
-          best_ids[k] = best_ids[k - 1];
-        }
-        best_scores[j] = s;
-        best_ids[j] = i;
-        break;
-      }
-    }
-  }
-
-  float denom = 0.0f;
-  for (int i = 0; i < topk; ++i) denom += best_scores[i];
-  if (!normalize || denom <= 0.0f) denom = 1.0f;
-
-  for (int i = 0; i < topk; ++i) {
-    out_ids[i] = best_ids[i];
-    float p = best_scores[i];
-    if (normalize) p /= denom;
-    out_probs[i] = p * routed_scale;
-  }
-}
-)CUDA";
 
 enum class FallbackReason {
   UnsupportedShape,
@@ -209,16 +81,15 @@ void bump_fallback(FallbackReason reason) {
   throw std::runtime_error(oss.str());
 }
 
-[[noreturn]] void fail_nvrtc(nvrtcResult st, const char* where, const std::string& log = std::string()) {
-  std::ostringstream oss;
-  oss << where << " failed: " << nvrtcGetErrorString(st);
-  if (!log.empty()) oss << "\n" << log;
-  throw std::runtime_error(oss.str());
-}
-
 [[noreturn]] void fail_cublas(cublasStatus_t st, const char* where) {
   std::ostringstream oss;
   oss << where << " failed: cublas status " << static_cast<int>(st);
+  throw std::runtime_error(oss.str());
+}
+
+[[noreturn]] void fail_runtime(cudaError_t st, const char* where) {
+  std::ostringstream oss;
+  oss << where << " failed: " << cudaGetErrorString(st);
   throw std::runtime_error(oss.str());
 }
 
@@ -226,39 +97,58 @@ void check_cuda(CUresult st, const char* where) {
   if (st != CUDA_SUCCESS) fail_cuda(st, where);
 }
 
-void check_nvrtc(nvrtcResult st, const char* where, const std::string& log = std::string()) {
-  if (st != NVRTC_SUCCESS) fail_nvrtc(st, where, log);
-}
-
 void check_cublas(cublasStatus_t st, const char* where) {
   if (st != CUBLAS_STATUS_SUCCESS) fail_cublas(st, where);
+}
+
+void check_runtime(cudaError_t st, const char* where) {
+  if (st != cudaSuccess) fail_runtime(st, where);
+}
+
+[[noreturn]] void fail_kernel_launch(const char* where) {
+  fail_runtime(cudaPeekAtLastError(), where);
 }
 
 inline float* dptr(CUdeviceptr ptr) { return reinterpret_cast<float*>(static_cast<uintptr_t>(ptr)); }
 inline const float* dptr_const(CUdeviceptr ptr) { return reinterpret_cast<const float*>(static_cast<uintptr_t>(ptr)); }
 inline int* iptr(CUdeviceptr ptr) { return reinterpret_cast<int*>(static_cast<uintptr_t>(ptr)); }
 
+extern CudaStats g_stats;
+
 class CudaContext {
  public:
   CudaContext() {
     check_cuda(cuInit(0), "cuInit");
     check_cuda(cuDeviceGet(&device_, 0), "cuDeviceGet");
-    check_cuda(cuCtxCreate(&ctx_, nullptr, 0, device_), "cuCtxCreate");
-    compile_kernels();
+    check_cuda(cuDevicePrimaryCtxRetain(&ctx_, device_), "cuDevicePrimaryCtxRetain");
+    activate();
+    check_runtime(cudaSetDevice(0), "cudaSetDevice");
+    check_cuda(cuStreamCreate(&stream_, CU_STREAM_DEFAULT), "cuStreamCreate");
     check_cublas(cublasCreate(&cublas_), "cublasCreate");
+    check_cublas(cublasSetStream(cublas_, reinterpret_cast<cudaStream_t>(stream_)), "cublasSetStream");
   }
 
   ~CudaContext() {
+    synchronize();
     for (auto& kv : weight_cache_) {
       if (kv.second.ptr != 0) cuMemFree(kv.second.ptr);
     }
     if (cublas_ != nullptr) cublasDestroy(cublas_);
-    if (module_ != nullptr) cuModuleUnload(module_);
-    if (ctx_ != nullptr) cuCtxDestroy(ctx_);
+    if (stream_ != nullptr) cuStreamDestroy(stream_);
+    if (ctx_ != nullptr) {
+      cuCtxSetCurrent(nullptr);
+      cuDevicePrimaryCtxRelease(device_);
+    }
   }
 
+  CUstream stream() const { return stream_; }
+
+  void activate() { check_cuda(cuCtxSetCurrent(ctx_), "cuCtxSetCurrent"); }
+
   void ensure_buffer(DeviceBuffer* buf, std::size_t bytes) {
+    activate();
     if (buf->bytes >= bytes) return;
+    synchronize();
     if (buf->ptr != 0) check_cuda(cuMemFree(buf->ptr), "cuMemFree(buffer)");
     buf->ptr = 0;
     buf->bytes = 0;
@@ -267,21 +157,38 @@ class CudaContext {
   }
 
   void zero_buffer(DeviceBuffer* buf, std::size_t bytes) {
+    activate();
     ensure_buffer(buf, bytes);
-    check_cuda(cuMemsetD8(buf->ptr, 0, bytes), "cuMemsetD8");
+    check_cuda(cuMemsetD8Async(buf->ptr, 0, bytes, stream_), "cuMemsetD8Async");
+  }
+
+  void synchronize() {
+    activate();
+    if (stream_ != nullptr) check_cuda(cuStreamSynchronize(stream_), "cuStreamSynchronize");
+  }
+
+  bool preload_weight(const ds::hf::TensorSlice& weight) {
+    activate();
+    try {
+      return cache_weight(weight) != nullptr;
+    } catch (const std::runtime_error&) {
+      return false;
+    }
   }
 
   bool linear_device(const ds::hf::TensorSlice& weight, CUdeviceptr x, std::size_t in, CUdeviceptr y, std::size_t out) {
+    activate();
     if (weight.shape.size() != 2) return false;
     if (static_cast<std::size_t>(weight.shape[0]) != out || static_cast<std::size_t>(weight.shape[1]) != in) return false;
 
     try {
-      const CachedWeight* cached = maybe_get_cached_weight(weight);
+      const CachedWeight* cached = cache_weight(weight);
       if (cached != nullptr) {
         gemv_row_major(cached->ptr, out, in, x, y);
         return true;
       }
 
+      ++g_stats.stream_linear_fallbacks;
       stream_linear(weight, x, in, y, out);
       return true;
     } catch (const std::runtime_error&) {
@@ -289,150 +196,126 @@ class CudaContext {
     }
   }
 
-  bool rmsnorm_device(CUdeviceptr x, const float* w, std::size_t n, float eps, CUdeviceptr y) {
-    ensure_buffer(&scratch_w_, n * sizeof(float));
-    check_cuda(cuMemcpyHtoD(scratch_w_.ptr, w, n * sizeof(float)), "cuMemcpyHtoD(rmsnorm w)");
-    int n_i = static_cast<int>(n);
-    void* args[] = {&x, &scratch_w_.ptr, &n_i, &eps, &y};
-    check_cuda(cuLaunchKernel(rmsnorm_kernel_, 1, 1, 1, kThreads, 1, 1, 0, nullptr, args, nullptr),
-               "cuLaunchKernel(rmsnorm)");
-    check_cuda(cuCtxSynchronize(), "cuCtxSynchronize(rmsnorm)");
+  bool embedding_to_device(CUdeviceptr y, const ds::hf::TensorSlice& embedding, std::int32_t token_id, std::size_t hidden_size) {
+    activate();
+    if (embedding.shape.size() != 2) return false;
+    if (token_id < 0 || token_id >= embedding.shape[0]) return false;
+    if (static_cast<std::size_t>(embedding.shape[1]) != hidden_size) return false;
+
+    try {
+      const CachedWeight* cached = cache_weight(embedding);
+      if (cached != nullptr) {
+        const std::size_t offset = static_cast<std::size_t>(token_id) * hidden_size * sizeof(float);
+        check_cuda(cuMemcpyDtoDAsync(y, cached->ptr + offset, hidden_size * sizeof(float), stream_),
+                   "cuMemcpyDtoDAsync(embedding)");
+        return true;
+      }
+
+      auto decoded = ds::hf::decode_rows_to_f32(embedding, static_cast<std::size_t>(token_id), 1);
+      check_cuda(cuMemcpyHtoD(y, decoded.data(), hidden_size * sizeof(float)), "cuMemcpyHtoD(embedding)");
+      return true;
+    } catch (const std::runtime_error&) {
+      return false;
+    }
+  }
+
+  bool rmsnorm_device(CUdeviceptr x, const NormWeights& norm, std::size_t n, float eps, CUdeviceptr y) {
+    activate();
+    if (!norm.valid()) return false;
+    CUdeviceptr w_ptr = 0;
+    const CachedWeight* cached = cache_weight(*norm.weight);
+    if (cached != nullptr) {
+      w_ptr = cached->ptr;
+    } else {
+      ensure_buffer(&scratch_w_, n * sizeof(float));
+      check_cuda(cuMemcpyHtoDAsync(scratch_w_.ptr, norm.data(), n * sizeof(float), stream_), "cuMemcpyHtoDAsync(rmsnorm w)");
+      w_ptr = scratch_w_.ptr;
+    }
+    if (!kernels::launch_rmsnorm(reinterpret_cast<cudaStream_t>(stream_), dptr_const(x), dptr_const(w_ptr),
+                                 static_cast<int>(n), eps, dptr(y))) {
+      fail_kernel_launch("launch_rmsnorm");
+    }
     return true;
   }
 
   void add_inplace(CUdeviceptr dst, CUdeviceptr src, std::size_t n) {
-    int n_i = static_cast<int>(n);
-    void* args[] = {&dst, &src, &n_i};
-    const unsigned grid = static_cast<unsigned>((n + kThreads - 1) / kThreads);
-    check_cuda(cuLaunchKernel(add_inplace_kernel_, grid, 1, 1, kThreads, 1, 1, 0, nullptr, args, nullptr),
-               "cuLaunchKernel(add_inplace)");
-    check_cuda(cuCtxSynchronize(), "cuCtxSynchronize(add_inplace)");
+    activate();
+    if (!kernels::launch_add_inplace(reinterpret_cast<cudaStream_t>(stream_), dptr(dst), dptr_const(src),
+                                     static_cast<int>(n))) {
+      fail_kernel_launch("launch_add_inplace");
+    }
   }
 
   void scale_add(CUdeviceptr dst, CUdeviceptr src, float scale, std::size_t n) {
-    int n_i = static_cast<int>(n);
-    void* args[] = {&dst, &src, &scale, &n_i};
-    const unsigned grid = static_cast<unsigned>((n + kThreads - 1) / kThreads);
-    check_cuda(cuLaunchKernel(scale_add_kernel_, grid, 1, 1, kThreads, 1, 1, 0, nullptr, args, nullptr),
-               "cuLaunchKernel(scale_add)");
-    check_cuda(cuCtxSynchronize(), "cuCtxSynchronize(scale_add)");
+    activate();
+    if (!kernels::launch_scale_add(reinterpret_cast<cudaStream_t>(stream_), dptr(dst), dptr_const(src), scale,
+                                   static_cast<int>(n))) {
+      fail_kernel_launch("launch_scale_add");
+    }
   }
 
   void silu_mul(CUdeviceptr gate, CUdeviceptr up, std::size_t n) {
-    int n_i = static_cast<int>(n);
-    void* args[] = {&gate, &up, &n_i};
-    const unsigned grid = static_cast<unsigned>((n + kThreads - 1) / kThreads);
-    check_cuda(cuLaunchKernel(silu_mul_kernel_, grid, 1, 1, kThreads, 1, 1, 0, nullptr, args, nullptr),
-               "cuLaunchKernel(silu_mul)");
-    check_cuda(cuCtxSynchronize(), "cuCtxSynchronize(silu_mul)");
+    activate();
+    if (!kernels::launch_silu_mul(reinterpret_cast<cudaStream_t>(stream_), dptr(gate), dptr_const(up),
+                                  static_cast<int>(n))) {
+      fail_kernel_launch("launch_silu_mul");
+    }
   }
 
   void rope_inplace(CUdeviceptr x, std::size_t dim, std::size_t pos, float theta) {
+    activate();
     if (dim == 0) return;
-    int dim_i = static_cast<int>(dim);
-    int pos_i = static_cast<int>(pos);
-    void* args[] = {&x, &dim_i, &pos_i, &theta};
-    const unsigned grid = static_cast<unsigned>(((dim / 2) + kThreads - 1) / kThreads);
-    check_cuda(cuLaunchKernel(rope_kernel_, grid, 1, 1, kThreads, 1, 1, 0, nullptr, args, nullptr),
-               "cuLaunchKernel(rope)");
-    check_cuda(cuCtxSynchronize(), "cuCtxSynchronize(rope)");
+    if (!kernels::launch_rope_inplace(reinterpret_cast<cudaStream_t>(stream_), dptr(x), static_cast<int>(dim),
+                                      static_cast<int>(pos), theta)) {
+      fail_kernel_launch("launch_rope_inplace");
+    }
   }
 
   void scores(CUdeviceptr q, CUdeviceptr k_base, std::size_t q_head, std::size_t seq_len, std::size_t key_stride,
               float scale, CUdeviceptr out_scores) {
-    int q_head_i = static_cast<int>(q_head);
-    int seq_len_i = static_cast<int>(seq_len);
-    int key_stride_i = static_cast<int>(key_stride);
-    void* args[] = {&q, &k_base, &q_head_i, &seq_len_i, &key_stride_i, &scale, &out_scores};
-    const unsigned grid = static_cast<unsigned>((seq_len + kThreads - 1) / kThreads);
-    check_cuda(cuLaunchKernel(scores_kernel_, grid, 1, 1, kThreads, 1, 1, 0, nullptr, args, nullptr),
-               "cuLaunchKernel(scores)");
-    check_cuda(cuCtxSynchronize(), "cuCtxSynchronize(scores)");
+    activate();
+    if (!kernels::launch_scores(reinterpret_cast<cudaStream_t>(stream_), dptr_const(q), dptr_const(k_base),
+                                static_cast<int>(q_head), static_cast<int>(seq_len), static_cast<int>(key_stride), scale,
+                                dptr(out_scores))) {
+      fail_kernel_launch("launch_scores");
+    }
   }
 
   void softmax(CUdeviceptr x, std::size_t n) {
-    int n_i = static_cast<int>(n);
-    void* args[] = {&x, &n_i};
-    check_cuda(cuLaunchKernel(softmax_kernel_, 1, 1, 1, kThreads, 1, 1, 0, nullptr, args, nullptr),
-               "cuLaunchKernel(softmax)");
-    check_cuda(cuCtxSynchronize(), "cuCtxSynchronize(softmax)");
+    activate();
+    if (!kernels::launch_softmax(reinterpret_cast<cudaStream_t>(stream_), dptr(x), static_cast<int>(n))) {
+      fail_kernel_launch("launch_softmax");
+    }
   }
 
   void weighted_sum(CUdeviceptr scores_ptr, CUdeviceptr v_base, std::size_t seq_len, std::size_t v_head,
                     std::size_t v_stride, CUdeviceptr out) {
-    int seq_len_i = static_cast<int>(seq_len);
-    int v_head_i = static_cast<int>(v_head);
-    int v_stride_i = static_cast<int>(v_stride);
-    void* args[] = {&scores_ptr, &v_base, &seq_len_i, &v_head_i, &v_stride_i, &out};
-    const unsigned grid = static_cast<unsigned>((v_head + kThreads - 1) / kThreads);
-    check_cuda(cuLaunchKernel(weighted_sum_kernel_, grid, 1, 1, kThreads, 1, 1, 0, nullptr, args, nullptr),
-               "cuLaunchKernel(weighted_sum)");
-    check_cuda(cuCtxSynchronize(), "cuCtxSynchronize(weighted_sum)");
+    activate();
+    if (!kernels::launch_weighted_sum(reinterpret_cast<cudaStream_t>(stream_), dptr_const(scores_ptr), dptr_const(v_base),
+                                      static_cast<int>(seq_len), static_cast<int>(v_head), static_cast<int>(v_stride),
+                                      dptr(out))) {
+      fail_kernel_launch("launch_weighted_sum");
+    }
   }
 
   void select_topk(CUdeviceptr scores_ptr, std::size_t n, std::size_t top_k, bool normalize, float routed_scale,
                    DeviceBuffer* ids, DeviceBuffer* probs) {
+    activate();
     ensure_buffer(ids, top_k * sizeof(std::int32_t));
     ensure_buffer(probs, top_k * sizeof(float));
-    int n_i = static_cast<int>(n);
-    int topk_i = static_cast<int>(top_k);
-    int normalize_i = normalize ? 1 : 0;
-    void* args[] = {&scores_ptr, &n_i, &topk_i, &normalize_i, &routed_scale, &ids->ptr, &probs->ptr};
-    check_cuda(cuLaunchKernel(select_topk_kernel_, 1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr),
-               "cuLaunchKernel(select_topk)");
-    check_cuda(cuCtxSynchronize(), "cuCtxSynchronize(select_topk)");
+    if (!kernels::launch_select_topk(reinterpret_cast<cudaStream_t>(stream_), dptr_const(scores_ptr), static_cast<int>(n),
+                                     static_cast<int>(top_k), normalize, routed_scale, iptr(ids->ptr), dptr(probs->ptr))) {
+      fail_kernel_launch("launch_select_topk");
+    }
   }
 
- private:
-  void compile_kernels() {
-    int major = 0;
-    int minor = 0;
-    check_cuda(cuDeviceGetAttribute(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device_),
-               "cuDeviceGetAttribute(major)");
-    check_cuda(cuDeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device_),
-               "cuDeviceGetAttribute(minor)");
-
-    nvrtcProgram prog = nullptr;
-    check_nvrtc(nvrtcCreateProgram(&prog, kKernelSource, "ds_runtime_kernels.cu", 0, nullptr, nullptr),
-                "nvrtcCreateProgram");
-
-    const std::string arch = "--gpu-architecture=sm_" + std::to_string(major) + std::to_string(minor);
-    const char* opts[] = {arch.c_str(), "--std=c++14"};
-    const auto compile_st = nvrtcCompileProgram(prog, 2, opts);
-
-    std::size_t log_size = 0;
-    check_nvrtc(nvrtcGetProgramLogSize(prog, &log_size), "nvrtcGetProgramLogSize");
-    std::string log(log_size, '\0');
-    if (log_size > 1) check_nvrtc(nvrtcGetProgramLog(prog, log.data()), "nvrtcGetProgramLog");
-    if (compile_st != NVRTC_SUCCESS) fail_nvrtc(compile_st, "nvrtcCompileProgram", log);
-
-    std::size_t image_size = 0;
-    check_nvrtc(nvrtcGetCUBINSize(prog, &image_size), "nvrtcGetCUBINSize");
-    std::string image(image_size, '\0');
-    check_nvrtc(nvrtcGetCUBIN(prog, image.data()), "nvrtcGetCUBIN");
-    check_nvrtc(nvrtcDestroyProgram(&prog), "nvrtcDestroyProgram");
-
-    check_cuda(cuModuleLoadDataEx(&module_, image.data(), 0, nullptr, nullptr), "cuModuleLoadDataEx");
-    check_cuda(cuModuleGetFunction(&rmsnorm_kernel_, module_, "ds_rmsnorm_kernel"), "cuModuleGetFunction(rmsnorm)");
-    check_cuda(cuModuleGetFunction(&add_inplace_kernel_, module_, "ds_add_inplace_kernel"),
-               "cuModuleGetFunction(add_inplace)");
-    check_cuda(cuModuleGetFunction(&scale_add_kernel_, module_, "ds_scale_add_kernel"),
-               "cuModuleGetFunction(scale_add)");
-    check_cuda(cuModuleGetFunction(&silu_mul_kernel_, module_, "ds_silu_mul_kernel"), "cuModuleGetFunction(silu_mul)");
-    check_cuda(cuModuleGetFunction(&rope_kernel_, module_, "ds_rope_inplace_kernel"), "cuModuleGetFunction(rope)");
-    check_cuda(cuModuleGetFunction(&scores_kernel_, module_, "ds_scores_kernel"), "cuModuleGetFunction(scores)");
-    check_cuda(cuModuleGetFunction(&softmax_kernel_, module_, "ds_softmax_kernel"), "cuModuleGetFunction(softmax)");
-    check_cuda(cuModuleGetFunction(&weighted_sum_kernel_, module_, "ds_weighted_sum_kernel"),
-               "cuModuleGetFunction(weighted_sum)");
-    check_cuda(cuModuleGetFunction(&select_topk_kernel_, module_, "ds_select_topk_kernel"),
-               "cuModuleGetFunction(select_topk)");
-  }
-
-  const CachedWeight* maybe_get_cached_weight(const ds::hf::TensorSlice& weight) {
+  const CachedWeight* cache_weight(const ds::hf::TensorSlice& weight) {
     const void* key = weight.data;
     auto it = weight_cache_.find(key);
-    if (it != weight_cache_.end()) return &it->second;
-    if (weight.nbytes > kWeightCacheThresholdBytes) return nullptr;
+    if (it != weight_cache_.end()) {
+      ++g_stats.cached_weight_hits;
+      return &it->second;
+    }
 
     auto decoded = ds::hf::decode_to_f32(weight);
     CUdeviceptr ptr = 0;
@@ -442,8 +325,11 @@ class CudaContext {
     } catch (const std::runtime_error&) {
       return nullptr;
     }
-    check_cuda(cuMemcpyHtoD(ptr, decoded.data(), bytes), "cuMemcpyHtoD(weight)");
+    check_cuda(cuMemcpyHtoDAsync(ptr, decoded.data(), bytes, stream_), "cuMemcpyHtoDAsync(weight)");
+    synchronize();
     auto [inserted_it, _] = weight_cache_.emplace(key, CachedWeight{ptr, bytes});
+    ++g_stats.cached_weight_uploads;
+    g_stats.cached_weight_bytes += bytes;
     return &inserted_it->second;
   }
 
@@ -462,8 +348,7 @@ class CudaContext {
       const std::size_t rows = std::min(rows_per_chunk, out - row0);
       auto decoded = ds::hf::decode_rows_to_f32(weight, row0, rows);
       ensure_buffer(&scratch_weight_, decoded.size() * sizeof(float));
-      check_cuda(cuMemcpyHtoD(scratch_weight_.ptr, decoded.data(), decoded.size() * sizeof(float)),
-                 "cuMemcpyHtoD(weight chunk)");
+      check_cuda(cuMemcpyHtoD(scratch_weight_.ptr, decoded.data(), decoded.size() * sizeof(float)), "cuMemcpyHtoD(weight chunk)");
       gemv_row_major(scratch_weight_.ptr, rows, in, d_x, d_y + row0 * sizeof(float));
       row0 += rows;
     }
@@ -471,18 +356,8 @@ class CudaContext {
 
   CUdevice device_ = 0;
   CUcontext ctx_ = nullptr;
-  CUmodule module_ = nullptr;
+  CUstream stream_ = nullptr;
   cublasHandle_t cublas_ = nullptr;
-
-  CUfunction rmsnorm_kernel_ = nullptr;
-  CUfunction add_inplace_kernel_ = nullptr;
-  CUfunction scale_add_kernel_ = nullptr;
-  CUfunction silu_mul_kernel_ = nullptr;
-  CUfunction rope_kernel_ = nullptr;
-  CUfunction scores_kernel_ = nullptr;
-  CUfunction softmax_kernel_ = nullptr;
-  CUfunction weighted_sum_kernel_ = nullptr;
-  CUfunction select_topk_kernel_ = nullptr;
 
   DeviceBuffer scratch_w_;
   DeviceBuffer scratch_weight_;
@@ -525,6 +400,7 @@ class CudaExecutorState {
   }
 
   ~CudaExecutorState() {
+    context().synchronize();
     for (auto& buf : slots_) {
       if (buf.ptr != 0) check_cuda(cuMemFree(buf.ptr), "cuMemFree(slot)");
     }
@@ -629,11 +505,39 @@ void reset_executor_state(CudaExecutorState* state) {
   state->reset();
 }
 
+bool preload_tensor(const ds::hf::TensorSlice& weight) {
+  try {
+    ensure_initialized();
+    return context().preload_weight(weight);
+  } catch (const std::runtime_error&) {
+    bump_fallback(FallbackReason::AllocFailed);
+    return false;
+  }
+}
+
+bool embedding_to_slot(CudaExecutorState* state, const ds::hf::TensorSlice& embedding, std::int32_t token_id,
+                       DeviceBufferSlot slot, std::size_t hidden_size) {
+  if (state == nullptr) return false;
+  try {
+    if (!context().embedding_to_device(slot_ptr(state, slot, hidden_size), embedding, token_id, hidden_size)) {
+      ++g_stats.embedding_cuda_fallbacks;
+      bump_fallback(FallbackReason::UnsupportedShape);
+      return false;
+    }
+    ++g_stats.embedding_cuda_hits;
+    return true;
+  } catch (const std::runtime_error&) {
+    ++g_stats.embedding_cuda_fallbacks;
+    bump_fallback(FallbackReason::KernelError);
+    return false;
+  }
+}
+
 bool upload_to_slot(CudaExecutorState* state, DeviceBufferSlot slot, const float* src, std::size_t n) {
   if (state == nullptr) return false;
   try {
     const auto ptr = slot_ptr(state, slot, n);
-    check_cuda(cuMemcpyHtoD(ptr, src, n * sizeof(float)), "cuMemcpyHtoD(slot)");
+    check_cuda(cuMemcpyHtoDAsync(ptr, src, n * sizeof(float), context().stream()), "cuMemcpyHtoDAsync(slot)");
     return true;
   } catch (const std::runtime_error&) {
     bump_fallback(FallbackReason::AllocFailed);
@@ -645,7 +549,8 @@ bool download_from_slot(CudaExecutorState* state, DeviceBufferSlot slot, float* 
   if (state == nullptr) return false;
   try {
     const auto ptr = slot_ptr(state, slot, n);
-    check_cuda(cuMemcpyDtoH(dst, ptr, n * sizeof(float)), "cuMemcpyDtoH(slot)");
+    check_cuda(cuMemcpyDtoHAsync(dst, ptr, n * sizeof(float), context().stream()), "cuMemcpyDtoHAsync(slot)");
+    context().synchronize();
     return true;
   } catch (const std::runtime_error&) {
     bump_fallback(FallbackReason::KernelError);
@@ -703,11 +608,11 @@ bool linear_to_slot(CudaExecutorState* state, const ds::hf::TensorSlice& weight,
   }
 }
 
-bool rmsnorm_to_slot(CudaExecutorState* state, DeviceBufferSlot x, const float* w, std::size_t n, float eps,
+bool rmsnorm_to_slot(CudaExecutorState* state, DeviceBufferSlot x, const NormWeights& norm, std::size_t n, float eps,
                      DeviceBufferSlot y) {
   if (state == nullptr) return false;
   try {
-    return context().rmsnorm_device(slot_ptr(state, x, n), w, n, eps, slot_ptr(state, y, n));
+    return context().rmsnorm_device(slot_ptr(state, x, n), norm, n, eps, slot_ptr(state, y, n));
   } catch (const std::runtime_error&) {
     bump_fallback(FallbackReason::KernelError);
     return false;
@@ -750,8 +655,11 @@ bool moe_to_slot(CudaExecutorState* state, const ds::hf::DeepSeekConfig& cfg, co
 
     std::vector<std::int32_t> top_ids(top_k, 0);
     std::vector<float> top_probs(top_k, 0.0f);
-    check_cuda(cuMemcpyDtoH(top_ids.data(), state->topk_ids().ptr, top_k * sizeof(std::int32_t)), "cuMemcpyDtoH(topk ids)");
-    check_cuda(cuMemcpyDtoH(top_probs.data(), state->topk_probs().ptr, top_k * sizeof(float)), "cuMemcpyDtoH(topk probs)");
+    check_cuda(cuMemcpyDtoHAsync(top_ids.data(), state->topk_ids().ptr, top_k * sizeof(std::int32_t), context().stream()),
+               "cuMemcpyDtoHAsync(topk ids)");
+    check_cuda(cuMemcpyDtoHAsync(top_probs.data(), state->topk_probs().ptr, top_k * sizeof(float), context().stream()),
+               "cuMemcpyDtoHAsync(topk probs)");
+    context().synchronize();
 
     for (std::size_t i = 0; i < top_k; ++i) {
       if (!dense_mlp_to_slot(state, moe.experts[static_cast<std::size_t>(top_ids[i])].ffn, hidden_size, x,
@@ -799,7 +707,7 @@ bool mla_decode_to_slot(CudaExecutorState* state, const ds::hf::DeepSeekConfig& 
       if (!attn.q_a_layernorm.valid()) return false;
       const auto q_rank = static_cast<std::size_t>(attn.q_a_proj.weight->shape[0]);
       if (!linear_to_slot(state, *attn.q_a_proj.weight, hidden, hidden_size, DeviceBufferSlot::Tmp0, q_rank)) return false;
-      if (!rmsnorm_to_slot(state, DeviceBufferSlot::Tmp0, attn.q_a_layernorm.data(), q_rank, cfg.rms_norm_eps,
+      if (!rmsnorm_to_slot(state, DeviceBufferSlot::Tmp0, attn.q_a_layernorm, q_rank, cfg.rms_norm_eps,
                            DeviceBufferSlot::Tmp1)) {
         return false;
       }
@@ -817,10 +725,11 @@ bool mla_decode_to_slot(CudaExecutorState* state, const ds::hf::DeepSeekConfig& 
                         kv_rank + qk_rope)) {
       return false;
     }
-    check_cuda(cuMemcpyDtoD(slot_ptr(state, DeviceBufferSlot::Tmp4, kv_rank), slot_ptr(state, DeviceBufferSlot::Tmp3, kv_rank + qk_rope),
-                            kv_rank * sizeof(float)),
-               "cuMemcpyDtoD(kv compressed)");
-    if (!rmsnorm_to_slot(state, DeviceBufferSlot::Tmp4, attn.kv_a_layernorm.data(), kv_rank, cfg.rms_norm_eps,
+    check_cuda(cuMemcpyDtoDAsync(slot_ptr(state, DeviceBufferSlot::Tmp4, kv_rank),
+                                 slot_ptr(state, DeviceBufferSlot::Tmp3, kv_rank + qk_rope), kv_rank * sizeof(float),
+                                 context().stream()),
+               "cuMemcpyDtoDAsync(kv compressed)");
+    if (!rmsnorm_to_slot(state, DeviceBufferSlot::Tmp4, attn.kv_a_layernorm, kv_rank, cfg.rms_norm_eps,
                          DeviceBufferSlot::Tmp4)) {
       return false;
     }
@@ -830,10 +739,10 @@ bool mla_decode_to_slot(CudaExecutorState* state, const ds::hf::DeepSeekConfig& 
     }
 
     if (qk_rope > 0) {
-      check_cuda(cuMemcpyDtoD(slot_ptr(state, DeviceBufferSlot::Tmp6, qk_rope),
-                              slot_ptr(state, DeviceBufferSlot::Tmp3, kv_rank + qk_rope) + kv_rank * sizeof(float),
-                              qk_rope * sizeof(float)),
-                 "cuMemcpyDtoD(shared_k_rope)");
+      check_cuda(cuMemcpyDtoDAsync(slot_ptr(state, DeviceBufferSlot::Tmp6, qk_rope),
+                                   slot_ptr(state, DeviceBufferSlot::Tmp3, kv_rank + qk_rope) + kv_rank * sizeof(float),
+                                   qk_rope * sizeof(float), context().stream()),
+                 "cuMemcpyDtoDAsync(shared_k_rope)");
       context().rope_inplace(slot_ptr(state, DeviceBufferSlot::Tmp6, qk_rope), qk_rope, pos, cfg.rope_theta);
     }
 
@@ -844,10 +753,10 @@ bool mla_decode_to_slot(CudaExecutorState* state, const ds::hf::DeepSeekConfig& 
     const float scale = 1.0f / std::sqrt(static_cast<float>(q_head));
 
     for (std::size_t head = 0; head < n_heads; ++head) {
-      check_cuda(cuMemcpyDtoD(slot_ptr(state, DeviceBufferSlot::Tmp0, q_head),
-                              slot_ptr(state, DeviceBufferSlot::Tmp2, n_heads * q_head) + head * q_head * sizeof(float),
-                              q_head * sizeof(float)),
-                 "cuMemcpyDtoD(q head)");
+      check_cuda(cuMemcpyDtoDAsync(slot_ptr(state, DeviceBufferSlot::Tmp0, q_head),
+                                   slot_ptr(state, DeviceBufferSlot::Tmp2, n_heads * q_head) + head * q_head * sizeof(float),
+                                   q_head * sizeof(float), context().stream()),
+                 "cuMemcpyDtoDAsync(q head)");
       if (qk_rope > 0) {
         context().rope_inplace(slot_ptr(state, DeviceBufferSlot::Tmp0, q_head) + qk_nope * sizeof(float), qk_rope, pos, cfg.rope_theta);
       }
@@ -856,21 +765,23 @@ bool mla_decode_to_slot(CudaExecutorState* state, const ds::hf::DeepSeekConfig& 
       const std::size_t val_offset = ((pos * n_heads + head) * v_head);
       const std::size_t kv_head_offset = head * (qk_nope + v_head);
       if (qk_nope > 0) {
-        check_cuda(cuMemcpyDtoD(cache.k.ptr + key_offset * sizeof(float),
-                                slot_ptr(state, DeviceBufferSlot::Tmp5, n_heads * (qk_nope + v_head)) + kv_head_offset * sizeof(float),
-                                qk_nope * sizeof(float)),
-                   "cuMemcpyDtoD(cache key)");
+        check_cuda(cuMemcpyDtoDAsync(cache.k.ptr + key_offset * sizeof(float),
+                                     slot_ptr(state, DeviceBufferSlot::Tmp5, n_heads * (qk_nope + v_head)) +
+                                         kv_head_offset * sizeof(float),
+                                     qk_nope * sizeof(float), context().stream()),
+                   "cuMemcpyDtoDAsync(cache key)");
       }
       if (qk_rope > 0) {
-        check_cuda(cuMemcpyDtoD(cache.k.ptr + (key_offset + qk_nope) * sizeof(float), slot_ptr(state, DeviceBufferSlot::Tmp6, qk_rope),
-                                qk_rope * sizeof(float)),
-                   "cuMemcpyDtoD(cache rope key)");
+        check_cuda(cuMemcpyDtoDAsync(cache.k.ptr + (key_offset + qk_nope) * sizeof(float),
+                                     slot_ptr(state, DeviceBufferSlot::Tmp6, qk_rope), qk_rope * sizeof(float),
+                                     context().stream()),
+                   "cuMemcpyDtoDAsync(cache rope key)");
       }
-      check_cuda(cuMemcpyDtoD(cache.v.ptr + val_offset * sizeof(float),
-                              slot_ptr(state, DeviceBufferSlot::Tmp5, n_heads * (qk_nope + v_head)) +
-                                  (kv_head_offset + qk_nope) * sizeof(float),
-                              v_head * sizeof(float)),
-                 "cuMemcpyDtoD(cache value)");
+      check_cuda(cuMemcpyDtoDAsync(cache.v.ptr + val_offset * sizeof(float),
+                                   slot_ptr(state, DeviceBufferSlot::Tmp5, n_heads * (qk_nope + v_head)) +
+                                       (kv_head_offset + qk_nope) * sizeof(float),
+                                   v_head * sizeof(float), context().stream()),
+                 "cuMemcpyDtoDAsync(cache value)");
 
       const CUdeviceptr head_k_base = cache.k.ptr + head * q_head * sizeof(float);
       const CUdeviceptr head_v_base = cache.v.ptr + head * v_head * sizeof(float);
@@ -912,8 +823,19 @@ bool rmsnorm_try(const float* x, const float* w, std::size_t n, float eps, float
     host_state = create_executor_state(dummy, 1, 0);
   });
 
+  ds::hf::TensorSlice weight;
+  weight.name = "runtime_rmsnorm";
+  weight.dtype = ds::hf::DType::F32;
+  weight.shape = {static_cast<std::int64_t>(n)};
+  weight.data = reinterpret_cast<const std::uint8_t*>(w);
+  weight.nbytes = n * sizeof(float);
+  weight.shard_path = "runtime";
+  NormWeights norm;
+  norm.weight = &weight;
+  norm.f32.assign(w, w + n);
+
   if (!upload_to_slot(host_state, DeviceBufferSlot::Hidden, x, n)) return false;
-  if (!rmsnorm_to_slot(host_state, DeviceBufferSlot::Hidden, w, n, eps, DeviceBufferSlot::Delta)) return false;
+  if (!rmsnorm_to_slot(host_state, DeviceBufferSlot::Hidden, norm, n, eps, DeviceBufferSlot::Delta)) return false;
   return download_from_slot(host_state, DeviceBufferSlot::Delta, y, n);
 }
 
@@ -945,7 +867,11 @@ bool linear_to_slot(CudaExecutorState*, const ds::hf::TensorSlice&, DeviceBuffer
                     std::size_t) {
   return false;
 }
-bool rmsnorm_to_slot(CudaExecutorState*, DeviceBufferSlot, const float*, std::size_t, float, DeviceBufferSlot) { return false; }
+bool preload_tensor(const ds::hf::TensorSlice&) { return false; }
+bool embedding_to_slot(CudaExecutorState*, const ds::hf::TensorSlice&, std::int32_t, DeviceBufferSlot, std::size_t) { return false; }
+bool rmsnorm_to_slot(CudaExecutorState*, DeviceBufferSlot, const NormWeights&, std::size_t, float, DeviceBufferSlot) {
+  return false;
+}
 bool dense_mlp_to_slot(CudaExecutorState*, const DenseMLPWeights&, std::size_t, DeviceBufferSlot, DeviceBufferSlot) {
   return false;
 }

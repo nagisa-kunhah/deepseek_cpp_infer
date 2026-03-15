@@ -51,8 +51,8 @@ DenseMLPWeights required_dense_mlp(const ds::hf::LoadedModel& model, const std::
 
 } // namespace
 
-WeightRegistry WeightRegistry::from_model(const ds::hf::DeepSeekConfig& cfg, const ds::hf::LoadedModel& model) {
-  WeightRegistry registry;
+DeepSeekWeightRegistry DeepSeekWeightRegistry::from_model(const ds::hf::DeepSeekConfig& cfg, const ds::hf::LoadedModel& model) {
+  DeepSeekWeightRegistry registry;
   registry.global_.embed_tokens = find_required(model, "model.embed_tokens.weight");
   registry.global_.final_norm = required_norm(model, "model.norm.weight");
   registry.global_.lm_head = find_required(model, "lm_head.weight");

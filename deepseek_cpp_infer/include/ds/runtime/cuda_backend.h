@@ -24,12 +24,18 @@ enum class DeviceBufferSlot {
 };
 
 struct CudaStats {
+  std::size_t embedding_cuda_hits = 0;
+  std::size_t embedding_cuda_fallbacks = 0;
   std::size_t linear_cuda_hits = 0;
   std::size_t linear_cuda_fallbacks = 0;
   std::size_t mla_cuda_hits = 0;
   std::size_t mla_cuda_fallbacks = 0;
   std::size_t moe_cuda_hits = 0;
   std::size_t moe_cuda_fallbacks = 0;
+  std::size_t cached_weight_hits = 0;
+  std::size_t cached_weight_uploads = 0;
+  std::size_t cached_weight_bytes = 0;
+  std::size_t stream_linear_fallbacks = 0;
 
   std::size_t fallback_unsupported_shape = 0;
   std::size_t fallback_alloc_failed = 0;
@@ -49,6 +55,9 @@ CudaExecutorState* create_executor_state(const ds::hf::DeepSeekConfig& cfg, std:
 void destroy_executor_state(CudaExecutorState* state);
 void reset_executor_state(CudaExecutorState* state);
 
+bool preload_tensor(const ds::hf::TensorSlice& weight);
+bool embedding_to_slot(CudaExecutorState* state, const ds::hf::TensorSlice& embedding, std::int32_t token_id,
+                       DeviceBufferSlot slot, std::size_t hidden_size);
 bool upload_to_slot(CudaExecutorState* state, DeviceBufferSlot slot, const float* src, std::size_t n);
 bool download_from_slot(CudaExecutorState* state, DeviceBufferSlot slot, float* dst, std::size_t n);
 bool zero_slot(CudaExecutorState* state, DeviceBufferSlot slot, std::size_t n);
@@ -56,7 +65,7 @@ bool add_inplace(CudaExecutorState* state, DeviceBufferSlot dst, DeviceBufferSlo
 
 bool linear_to_slot(CudaExecutorState* state, const ds::hf::TensorSlice& weight, DeviceBufferSlot x, std::size_t in,
                     DeviceBufferSlot y, std::size_t out);
-bool rmsnorm_to_slot(CudaExecutorState* state, DeviceBufferSlot x, const float* w, std::size_t n, float eps,
+bool rmsnorm_to_slot(CudaExecutorState* state, DeviceBufferSlot x, const NormWeights& norm, std::size_t n, float eps,
                      DeviceBufferSlot y);
 
 bool dense_mlp_to_slot(CudaExecutorState* state, const DenseMLPWeights& mlp, std::size_t hidden_size, DeviceBufferSlot x,
