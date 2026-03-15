@@ -10,6 +10,8 @@
 
 #include <cublas_v2.h>
 #include <cuda.h>
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
 
 #include <algorithm>
 #include <array>
@@ -42,9 +44,17 @@ struct DeviceBuffer {
   std::size_t bytes = 0;
 };
 
+enum class CachedWeightKind {
+  RawF32,
+  RawF16,
+  RawBF16,
+  DecodedF32,
+};
+
 struct CachedWeight {
   CUdeviceptr ptr = 0;
   std::size_t bytes = 0;
+  CachedWeightKind kind = CachedWeightKind::DecodedF32;
 };
 
 struct CudaMLACache {
@@ -112,6 +122,10 @@ void check_runtime(cudaError_t st, const char* where) {
 inline float* dptr(CUdeviceptr ptr) { return reinterpret_cast<float*>(static_cast<uintptr_t>(ptr)); }
 inline const float* dptr_const(CUdeviceptr ptr) { return reinterpret_cast<const float*>(static_cast<uintptr_t>(ptr)); }
 inline int* iptr(CUdeviceptr ptr) { return reinterpret_cast<int*>(static_cast<uintptr_t>(ptr)); }
+inline std::uint16_t* u16ptr(CUdeviceptr ptr) { return reinterpret_cast<std::uint16_t*>(static_cast<uintptr_t>(ptr)); }
+inline const std::uint16_t* u16ptr_const(CUdeviceptr ptr) {
+  return reinterpret_cast<const std::uint16_t*>(static_cast<uintptr_t>(ptr));
+}
 
 extern CudaStats g_stats;
 
@@ -126,6 +140,10 @@ class CudaContext {
     check_cuda(cuStreamCreate(&stream_, CU_STREAM_DEFAULT), "cuStreamCreate");
     check_cublas(cublasCreate(&cublas_), "cublasCreate");
     check_cublas(cublasSetStream(cublas_, reinterpret_cast<cudaStream_t>(stream_)), "cublasSetStream");
+    int cc_major = 0;
+    check_cuda(cuDeviceGetAttribute(&cc_major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device_),
+               "cuDeviceGetAttribute(cc_major)");
+    bf16_supported_ = cc_major >= 8;
   }
 
   ~CudaContext() {
@@ -184,7 +202,7 @@ class CudaContext {
     try {
       const CachedWeight* cached = cache_weight(weight);
       if (cached != nullptr) {
-        gemv_row_major(cached->ptr, out, in, x, y);
+        gemv_row_major_mixed(*cached, out, in, x, y);
         return true;
       }
 
@@ -201,23 +219,74 @@ class CudaContext {
     if (embedding.shape.size() != 2) return false;
     if (token_id < 0 || token_id >= embedding.shape[0]) return false;
     if (static_cast<std::size_t>(embedding.shape[1]) != hidden_size) return false;
+    const std::size_t row = static_cast<std::size_t>(token_id);
 
     try {
       const CachedWeight* cached = cache_weight(embedding);
       if (cached != nullptr) {
-        const std::size_t offset = static_cast<std::size_t>(token_id) * hidden_size * sizeof(float);
-        check_cuda(cuMemcpyDtoDAsync(y, cached->ptr + offset, hidden_size * sizeof(float), stream_),
-                   "cuMemcpyDtoDAsync(embedding)");
-        return true;
+        switch (cached->kind) {
+          case CachedWeightKind::RawF32:
+          case CachedWeightKind::DecodedF32: {
+            const std::size_t offset = row * hidden_size * sizeof(float);
+            check_cuda(cuMemcpyDtoDAsync(y, cached->ptr + offset, hidden_size * sizeof(float), stream_),
+                       "cuMemcpyDtoDAsync(embedding)");
+            return true;
+          }
+          case CachedWeightKind::RawF16: {
+            const auto src = u16ptr_const(cached->ptr) + row * hidden_size;
+            if (!kernels::launch_f16_row_to_f32(reinterpret_cast<cudaStream_t>(stream_), src, static_cast<int>(hidden_size),
+                                                dptr(y))) {
+              fail_kernel_launch("launch_f16_row_to_f32");
+            }
+            return true;
+          }
+          case CachedWeightKind::RawBF16: {
+            const auto src = u16ptr_const(cached->ptr) + row * hidden_size;
+            if (!kernels::launch_bf16_row_to_f32(reinterpret_cast<cudaStream_t>(stream_), src,
+                                                 static_cast<int>(hidden_size), dptr(y))) {
+              fail_kernel_launch("launch_bf16_row_to_f32");
+            }
+            return true;
+          }
+        }
+        throw std::runtime_error("embedding: unsupported cached weight kind");
       }
 
-      auto decoded = ds::hf::decode_rows_to_f32(embedding, static_cast<std::size_t>(token_id), 1);
-      check_cuda(cuMemcpyHtoD(y, decoded.data(), hidden_size * sizeof(float)), "cuMemcpyHtoD(embedding)");
-      return true;
+      switch (embedding.dtype) {
+        case ds::hf::DType::F32: {
+          auto decoded = ds::hf::decode_rows_to_f32(embedding, row, 1);
+          check_cuda(cuMemcpyHtoD(y, decoded.data(), hidden_size * sizeof(float)), "cuMemcpyHtoD(embedding)");
+          return true;
+        }
+        case ds::hf::DType::F16:
+        case ds::hf::DType::BF16: {
+          const std::size_t elem = ds::hf::dtype_nbytes(embedding.dtype);
+          ensure_buffer(&scratch_weight_, hidden_size * elem);
+          const auto* src = embedding.data + row * hidden_size * elem;
+          check_cuda(cuMemcpyHtoDAsync(scratch_weight_.ptr, src, hidden_size * elem, stream_),
+                     "cuMemcpyHtoDAsync(embedding row)");
+          if (embedding.dtype == ds::hf::DType::F16) {
+            if (!kernels::launch_f16_row_to_f32(reinterpret_cast<cudaStream_t>(stream_), u16ptr_const(scratch_weight_.ptr),
+                                                static_cast<int>(hidden_size), dptr(y))) {
+              fail_kernel_launch("launch_f16_row_to_f32");
+            }
+          } else {
+            if (!kernels::launch_bf16_row_to_f32(reinterpret_cast<cudaStream_t>(stream_),
+                                                 u16ptr_const(scratch_weight_.ptr), static_cast<int>(hidden_size), dptr(y))) {
+              fail_kernel_launch("launch_bf16_row_to_f32");
+            }
+          }
+          return true;
+        }
+        default:
+          return false;
+      }
     } catch (const std::runtime_error&) {
       return false;
     }
   }
+
+  bool supports_bf16_gemm() const { return bf16_supported_; }
 
   bool rmsnorm_device(CUdeviceptr x, const NormWeights& norm, std::size_t n, float eps, CUdeviceptr y) {
     activate();
@@ -317,39 +386,140 @@ class CudaContext {
       return &it->second;
     }
 
-    auto decoded = ds::hf::decode_to_f32(weight);
-    CUdeviceptr ptr = 0;
-    const std::size_t bytes = decoded.size() * sizeof(float);
+    CachedWeight cached;
+    const void* host_data = weight.data;
+    std::vector<float> decoded;
+    switch (weight.dtype) {
+      case ds::hf::DType::F32:
+        cached.kind = CachedWeightKind::RawF32;
+        cached.bytes = weight.nbytes;
+        break;
+      case ds::hf::DType::F16:
+        cached.kind = CachedWeightKind::RawF16;
+        cached.bytes = weight.nbytes;
+        break;
+      case ds::hf::DType::BF16:
+        if (supports_bf16_gemm()) {
+          cached.kind = CachedWeightKind::RawBF16;
+          cached.bytes = weight.nbytes;
+        } else {
+          decoded = ds::hf::decode_to_f32(weight);
+          cached.kind = CachedWeightKind::DecodedF32;
+          cached.bytes = decoded.size() * sizeof(float);
+          host_data = decoded.data();
+        }
+        break;
+      default:
+        throw std::runtime_error("cache_weight: unsupported dtype");
+    }
+
+    if (cached.kind != CachedWeightKind::DecodedF32) {
+      host_data = weight.data;
+    }
+
     try {
-      check_cuda(cuMemAlloc(&ptr, bytes), "cuMemAlloc(weight)");
+      check_cuda(cuMemAlloc(&cached.ptr, cached.bytes), "cuMemAlloc(weight)");
     } catch (const std::runtime_error&) {
       return nullptr;
     }
-    check_cuda(cuMemcpyHtoDAsync(ptr, decoded.data(), bytes, stream_), "cuMemcpyHtoDAsync(weight)");
+    check_cuda(cuMemcpyHtoDAsync(cached.ptr, host_data, cached.bytes, stream_), "cuMemcpyHtoDAsync(weight)");
     synchronize();
-    auto [inserted_it, _] = weight_cache_.emplace(key, CachedWeight{ptr, bytes});
+    auto [inserted_it, _] = weight_cache_.emplace(key, cached);
     ++g_stats.cached_weight_uploads;
-    g_stats.cached_weight_bytes += bytes;
+    g_stats.cached_weight_bytes += cached.bytes;
     return &inserted_it->second;
   }
 
-  void gemv_row_major(CUdeviceptr d_weight, std::size_t rows, std::size_t cols, CUdeviceptr d_x, CUdeviceptr d_y) {
+  void gemv_row_major_mixed(const CachedWeight& weight, std::size_t rows, std::size_t cols, CUdeviceptr d_x, CUdeviceptr d_y) {
     const float alpha = 1.0f;
     const float beta = 0.0f;
-    check_cublas(cublasSgemv(cublas_, CUBLAS_OP_T, static_cast<int>(cols), static_cast<int>(rows), &alpha, dptr_const(d_weight),
-                             static_cast<int>(cols), dptr_const(d_x), 1, &beta, dptr(d_y), 1),
-                 "cublasSgemv");
+    switch (weight.kind) {
+      case CachedWeightKind::RawF32:
+      case CachedWeightKind::DecodedF32:
+        check_cublas(cublasSgemv(cublas_, CUBLAS_OP_T, static_cast<int>(cols), static_cast<int>(rows), &alpha,
+                                 dptr_const(weight.ptr), static_cast<int>(cols), dptr_const(d_x), 1, &beta, dptr(d_y), 1),
+                     "cublasSgemv");
+        return;
+      case CachedWeightKind::RawF16:
+        ensure_buffer(&scratch_x_, cols * sizeof(std::uint16_t));
+        if (!kernels::launch_f32_to_f16(reinterpret_cast<cudaStream_t>(stream_), dptr_const(d_x), static_cast<int>(cols),
+                                        u16ptr(scratch_x_.ptr))) {
+          fail_kernel_launch("launch_f32_to_f16");
+        }
+        check_cublas(cublasGemmEx(cublas_, CUBLAS_OP_T, CUBLAS_OP_N, static_cast<int>(rows), 1, static_cast<int>(cols),
+                                  &alpha, reinterpret_cast<const __half*>(static_cast<uintptr_t>(weight.ptr)), CUDA_R_16F,
+                                  static_cast<int>(cols), reinterpret_cast<const __half*>(static_cast<uintptr_t>(scratch_x_.ptr)),
+                                  CUDA_R_16F, static_cast<int>(cols), &beta,
+                                  dptr(d_y), CUDA_R_32F, static_cast<int>(rows), CUBLAS_COMPUTE_32F,
+                                  CUBLAS_GEMM_DEFAULT),
+                     "cublasGemmEx(f16)");
+        return;
+      case CachedWeightKind::RawBF16:
+        ensure_buffer(&scratch_x_, cols * sizeof(std::uint16_t));
+        if (!kernels::launch_f32_to_bf16(reinterpret_cast<cudaStream_t>(stream_), dptr_const(d_x), static_cast<int>(cols),
+                                         u16ptr(scratch_x_.ptr))) {
+          fail_kernel_launch("launch_f32_to_bf16");
+        }
+        check_cublas(cublasGemmEx(cublas_, CUBLAS_OP_T, CUBLAS_OP_N, static_cast<int>(rows), 1, static_cast<int>(cols),
+                                  &alpha, reinterpret_cast<const __nv_bfloat16*>(static_cast<uintptr_t>(weight.ptr)),
+                                  CUDA_R_16BF, static_cast<int>(cols),
+                                  reinterpret_cast<const __nv_bfloat16*>(static_cast<uintptr_t>(scratch_x_.ptr)),
+                                  CUDA_R_16BF, static_cast<int>(cols), &beta, dptr(d_y), CUDA_R_32F,
+                                  static_cast<int>(rows), CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT),
+                     "cublasGemmEx(bf16)");
+        return;
+    }
   }
 
   void stream_linear(const ds::hf::TensorSlice& weight, CUdeviceptr d_x, std::size_t in, CUdeviceptr d_y, std::size_t out) {
-    const std::size_t rows_per_chunk = std::max<std::size_t>(1, kStreamWeightChunkBytes / (in * sizeof(float)));
+    const std::size_t elem_bytes = ds::hf::dtype_nbytes(weight.dtype);
+    if (elem_bytes == 0) throw std::runtime_error("stream_linear: unknown dtype");
+    const std::size_t rows_per_chunk = std::max<std::size_t>(1, kStreamWeightChunkBytes / (in * elem_bytes));
     std::size_t row0 = 0;
     while (row0 < out) {
       const std::size_t rows = std::min(rows_per_chunk, out - row0);
-      auto decoded = ds::hf::decode_rows_to_f32(weight, row0, rows);
-      ensure_buffer(&scratch_weight_, decoded.size() * sizeof(float));
-      check_cuda(cuMemcpyHtoD(scratch_weight_.ptr, decoded.data(), decoded.size() * sizeof(float)), "cuMemcpyHtoD(weight chunk)");
-      gemv_row_major(scratch_weight_.ptr, rows, in, d_x, d_y + row0 * sizeof(float));
+      CachedWeight chunk;
+      switch (weight.dtype) {
+        case ds::hf::DType::F32: {
+          auto decoded = ds::hf::decode_rows_to_f32(weight, row0, rows);
+          chunk.kind = CachedWeightKind::RawF32;
+          chunk.bytes = decoded.size() * sizeof(float);
+          ensure_buffer(&scratch_weight_, chunk.bytes);
+          check_cuda(cuMemcpyHtoD(scratch_weight_.ptr, decoded.data(), chunk.bytes), "cuMemcpyHtoD(weight chunk)");
+          chunk.ptr = scratch_weight_.ptr;
+          break;
+        }
+        case ds::hf::DType::F16: {
+          chunk.kind = CachedWeightKind::RawF16;
+          chunk.bytes = rows * in * elem_bytes;
+          ensure_buffer(&scratch_weight_, chunk.bytes);
+          const auto* src = weight.data + row0 * in * elem_bytes;
+          check_cuda(cuMemcpyHtoD(scratch_weight_.ptr, src, chunk.bytes), "cuMemcpyHtoD(weight chunk)");
+          chunk.ptr = scratch_weight_.ptr;
+          break;
+        }
+        case ds::hf::DType::BF16: {
+          if (supports_bf16_gemm()) {
+            chunk.kind = CachedWeightKind::RawBF16;
+            chunk.bytes = rows * in * elem_bytes;
+            ensure_buffer(&scratch_weight_, chunk.bytes);
+            const auto* src = weight.data + row0 * in * elem_bytes;
+            check_cuda(cuMemcpyHtoD(scratch_weight_.ptr, src, chunk.bytes), "cuMemcpyHtoD(weight chunk)");
+            chunk.ptr = scratch_weight_.ptr;
+          } else {
+            auto decoded = ds::hf::decode_rows_to_f32(weight, row0, rows);
+            chunk.kind = CachedWeightKind::DecodedF32;
+            chunk.bytes = decoded.size() * sizeof(float);
+            ensure_buffer(&scratch_weight_, chunk.bytes);
+            check_cuda(cuMemcpyHtoD(scratch_weight_.ptr, decoded.data(), chunk.bytes), "cuMemcpyHtoD(weight chunk)");
+            chunk.ptr = scratch_weight_.ptr;
+          }
+          break;
+        }
+        default:
+          throw std::runtime_error("stream_linear: unsupported dtype");
+      }
+      gemv_row_major_mixed(chunk, rows, in, d_x, d_y + row0 * sizeof(float));
       row0 += rows;
     }
   }
@@ -358,9 +528,11 @@ class CudaContext {
   CUcontext ctx_ = nullptr;
   CUstream stream_ = nullptr;
   cublasHandle_t cublas_ = nullptr;
+  bool bf16_supported_ = false;
 
   DeviceBuffer scratch_w_;
   DeviceBuffer scratch_weight_;
+  DeviceBuffer scratch_x_;
   std::unordered_map<const void*, CachedWeight> weight_cache_;
 };
 
