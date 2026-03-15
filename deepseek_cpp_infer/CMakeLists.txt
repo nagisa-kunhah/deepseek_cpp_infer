@@ -60,13 +60,16 @@ add_executable(ds_chat
   src/runtime/backend.cpp
   src/runtime/model.cpp
   src/runtime/model_factory.cpp
-  src/runtime/deepseek_model.cpp
-  src/runtime/weights.cpp
   src/runtime/tokenizer.cpp
-  src/ops/runtime/ops.cpp
-  src/ops/runtime/mla.cpp
   src/runtime/model_executor.cpp
-  src/runtime/cuda_backend.cpp
+  src/models/core/registry.cpp
+  src/models/deepseek/config.cpp
+  src/models/deepseek/package.cpp
+  src/models/deepseek/model.cpp
+  src/models/deepseek/weights.cpp
+  src/models/deepseek/ops.cpp
+  src/models/deepseek/mla.cpp
+  src/models/deepseek/cuda_backend.cpp
   ${DS_CUDA_RUNTIME_SOURCES}
 )
 
@@ -103,15 +106,18 @@ add_executable(ds_tests
   src/hf/model_loader.cpp
   src/hf/weight_ops.cpp
   src/hf/weights_index.cpp
-  src/runtime/weights.cpp
   src/runtime/backend.cpp
   src/runtime/model.cpp
   src/runtime/model_factory.cpp
-  src/runtime/deepseek_model.cpp
   src/runtime/tokenizer.cpp
-  src/ops/runtime/ops.cpp
-  src/ops/runtime/mla.cpp
   src/runtime/model_executor.cpp
+  src/models/core/registry.cpp
+  src/models/deepseek/config.cpp
+  src/models/deepseek/package.cpp
+  src/models/deepseek/model.cpp
+  src/models/deepseek/weights.cpp
+  src/models/deepseek/ops.cpp
+  src/models/deepseek/mla.cpp
 )
 
 target_include_directories(ds_tests PRIVATE include)
@@ -144,13 +150,16 @@ if(DS_USE_CUDA)
     src/runtime/backend.cpp
     src/runtime/model.cpp
     src/runtime/model_factory.cpp
-    src/runtime/deepseek_model.cpp
-    src/runtime/weights.cpp
     src/runtime/tokenizer.cpp
-    src/ops/runtime/ops.cpp
-    src/ops/runtime/mla.cpp
     src/runtime/model_executor.cpp
-    src/runtime/cuda_backend.cpp
+    src/models/core/registry.cpp
+    src/models/deepseek/config.cpp
+    src/models/deepseek/package.cpp
+    src/models/deepseek/model.cpp
+    src/models/deepseek/weights.cpp
+    src/models/deepseek/ops.cpp
+    src/models/deepseek/mla.cpp
+    src/models/deepseek/cuda_backend.cpp
     ${DS_CUDA_RUNTIME_SOURCES}
   )
   target_include_directories(ds_cuda_tests PRIVATE include)

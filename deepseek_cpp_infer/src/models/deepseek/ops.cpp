@@ -1,9 +1,9 @@
-#include "ds/runtime/ops.h"
+#include "ds/models/deepseek/ops.h"
 
 #include "ds/core/math.h"
 #include "ds/core/ops.h"
 #include "ds/hf/decode.h"
-#include "ds/runtime/cuda_backend.h"
+#include "ds/models/deepseek/cuda_backend.h"
 
 #include <algorithm>
 #include <cmath>
