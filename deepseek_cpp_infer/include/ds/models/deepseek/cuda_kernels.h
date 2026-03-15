@@ -2,6 +2,7 @@
 
 #if DS_USE_CUDA
 
+#include <cstdint>
 #include <cuda_runtime_api.h>
 
 namespace ds::rt::cuda::kernels {
@@ -18,6 +19,10 @@ bool launch_weighted_sum(cudaStream_t stream, const float* scores, const float* 
                          int v_stride, float* out);
 bool launch_select_topk(cudaStream_t stream, const float* scores, int n, int topk, bool normalize, float routed_scale,
                         int* out_ids, float* out_probs);
+bool launch_f16_row_to_f32(cudaStream_t stream, const std::uint16_t* src, int n, float* dst);
+bool launch_bf16_row_to_f32(cudaStream_t stream, const std::uint16_t* src, int n, float* dst);
+bool launch_f32_to_f16(cudaStream_t stream, const float* src, int n, std::uint16_t* dst);
+bool launch_f32_to_bf16(cudaStream_t stream, const float* src, int n, std::uint16_t* dst);
 
 } // namespace ds::rt::cuda::kernels
 

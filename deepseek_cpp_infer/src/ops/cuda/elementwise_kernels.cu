@@ -2,6 +2,9 @@
 
 #if DS_USE_CUDA
 
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
+
 namespace ds::rt::cuda::kernels {
 namespace {
 
@@ -57,6 +60,30 @@ __global__ void ds_rope_inplace_kernel(float* x, int dim, int pos, float theta) 
   x[i1] = a * s + b * c;
 }
 
+__global__ void ds_f16_row_to_f32_kernel(const std::uint16_t* src, int n, float* dst) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  dst[i] = __half2float(reinterpret_cast<const __half*>(src)[i]);
+}
+
+__global__ void ds_bf16_row_to_f32_kernel(const std::uint16_t* src, int n, float* dst) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  dst[i] = __bfloat162float(reinterpret_cast<const __nv_bfloat16*>(src)[i]);
+}
+
+__global__ void ds_f32_to_f16_kernel(const float* src, int n, std::uint16_t* dst) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  reinterpret_cast<__half*>(dst)[i] = __float2half_rn(src[i]);
+}
+
+__global__ void ds_f32_to_bf16_kernel(const float* src, int n, std::uint16_t* dst) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  reinterpret_cast<__nv_bfloat16*>(dst)[i] = __float2bfloat16(src[i]);
+}
+
 void clear_last_error() { static_cast<void>(cudaGetLastError()); }
 bool launched_ok() { return cudaPeekAtLastError() == cudaSuccess; }
 
@@ -93,6 +120,34 @@ bool launch_rope_inplace(cudaStream_t stream, float* x, int dim, int pos, float 
   clear_last_error();
   const unsigned grid = static_cast<unsigned>(((dim / 2) + kThreads - 1) / kThreads);
   ds_rope_inplace_kernel<<<grid, kThreads, 0, stream>>>(x, dim, pos, theta);
+  return launched_ok();
+}
+
+bool launch_f16_row_to_f32(cudaStream_t stream, const std::uint16_t* src, int n, float* dst) {
+  clear_last_error();
+  const unsigned grid = static_cast<unsigned>((n + kThreads - 1) / kThreads);
+  ds_f16_row_to_f32_kernel<<<grid, kThreads, 0, stream>>>(src, n, dst);
+  return launched_ok();
+}
+
+bool launch_bf16_row_to_f32(cudaStream_t stream, const std::uint16_t* src, int n, float* dst) {
+  clear_last_error();
+  const unsigned grid = static_cast<unsigned>((n + kThreads - 1) / kThreads);
+  ds_bf16_row_to_f32_kernel<<<grid, kThreads, 0, stream>>>(src, n, dst);
+  return launched_ok();
+}
+
+bool launch_f32_to_f16(cudaStream_t stream, const float* src, int n, std::uint16_t* dst) {
+  clear_last_error();
+  const unsigned grid = static_cast<unsigned>((n + kThreads - 1) / kThreads);
+  ds_f32_to_f16_kernel<<<grid, kThreads, 0, stream>>>(src, n, dst);
+  return launched_ok();
+}
+
+bool launch_f32_to_bf16(cudaStream_t stream, const float* src, int n, std::uint16_t* dst) {
+  clear_last_error();
+  const unsigned grid = static_cast<unsigned>((n + kThreads - 1) / kThreads);
+  ds_f32_to_bf16_kernel<<<grid, kThreads, 0, stream>>>(src, n, dst);
   return launched_ok();
 }
 
