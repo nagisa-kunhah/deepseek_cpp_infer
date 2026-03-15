@@ -9,19 +9,6 @@
 #include <stdexcept>
 
 namespace ds::rt {
-namespace {
-
-#if DS_USE_CUDA
-void preload_linear_weight(const LinearWeights& linear) {
-  if (linear.weight != nullptr) (void)ds::rt::cuda::preload_tensor(*linear.weight);
-}
-
-void preload_norm_weight(const NormWeights& norm) {
-  if (norm.weight != nullptr) (void)ds::rt::cuda::preload_tensor(*norm.weight);
-}
-#endif
-
-} // namespace
 
 void CudaStateDeleter::operator()(cuda::CudaExecutorState* state) const {
 #if DS_USE_CUDA
@@ -99,38 +86,6 @@ DeepSeekModel::DeepSeekModel(const ds::hf::DeepSeekConfig& cfg, ds::hf::LoadedMo
   info_.supported_backends.push_back(BackendKind::CPU);
 #if DS_USE_CUDA
   info_.supported_backends.push_back(BackendKind::CUDA);
-  if (ds::rt::cuda::available()) {
-    if (registry_.global().embed_tokens != nullptr) (void)ds::rt::cuda::preload_tensor(*registry_.global().embed_tokens);
-    preload_norm_weight(registry_.global().final_norm);
-    if (registry_.global().lm_head != nullptr) (void)ds::rt::cuda::preload_tensor(*registry_.global().lm_head);
-    for (const auto& layer : registry_.layers()) {
-      preload_norm_weight(layer.input_layernorm);
-      preload_norm_weight(layer.post_attention_layernorm);
-      preload_linear_weight(layer.attention.q_proj);
-      preload_linear_weight(layer.attention.q_a_proj);
-      preload_norm_weight(layer.attention.q_a_layernorm);
-      preload_linear_weight(layer.attention.q_b_proj);
-      preload_linear_weight(layer.attention.kv_a_proj_with_mqa);
-      preload_norm_weight(layer.attention.kv_a_layernorm);
-      preload_linear_weight(layer.attention.kv_b_proj);
-      preload_linear_weight(layer.attention.o_proj);
-      if (layer.kind == LayerKind::Dense) {
-        preload_linear_weight(layer.dense_mlp.gate_proj);
-        preload_linear_weight(layer.dense_mlp.up_proj);
-        preload_linear_weight(layer.dense_mlp.down_proj);
-      } else {
-        preload_linear_weight(layer.moe.gate);
-        preload_linear_weight(layer.moe.shared_experts.gate_proj);
-        preload_linear_weight(layer.moe.shared_experts.up_proj);
-        preload_linear_weight(layer.moe.shared_experts.down_proj);
-        for (const auto& expert : layer.moe.experts) {
-          preload_linear_weight(expert.ffn.gate_proj);
-          preload_linear_weight(expert.ffn.up_proj);
-          preload_linear_weight(expert.ffn.down_proj);
-        }
-      }
-    }
-  }
 #endif
 }
 

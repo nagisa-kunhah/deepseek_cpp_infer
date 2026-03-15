@@ -236,6 +236,27 @@ void test_tokenizer() {
   assert(ids[2] == 2);
 }
 
+void test_tokenizer_word_start_variants_after_spaces() {
+  const std::string path = "/tmp/ds_runtime_tokenizer_word_start_test.json";
+  std::ofstream f(path);
+  f << R"({
+    "model": {
+      "type": "BPE",
+      "vocab": {
+        "good": 0,
+        "Ġmorning": 1
+      }
+    }
+  })";
+  f.close();
+
+  const auto tok = ds::rt::Tokenizer::load_from_file(path);
+  const auto ids = tok.encode("good morning");
+  assert(ids.size() == 2);
+  assert(ids[0] == 0);
+  assert(ids[1] == 1);
+}
+
 void test_deepseek_weight_registry() {
   auto cfg = make_cfg();
   auto model = make_model();
@@ -380,6 +401,7 @@ int main() {
     f << R"({"model_type":"deepseek_v2","hidden_size":4,"num_hidden_layers":2,"vocab_size":8})";
   }
   test_tokenizer();
+  test_tokenizer_word_start_variants_after_spaces();
   test_runtime_model_executor_is_generic();
   test_deepseek_weight_registry();
   test_mla_smoke();

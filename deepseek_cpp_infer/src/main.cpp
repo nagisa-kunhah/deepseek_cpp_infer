@@ -32,6 +32,7 @@ namespace {
       "  --prompt <text>\n"
       "  --prompt-ids <id0,id1,...>\n"
       "  --max-new-tokens <n>\n"
+      "  --max-seq <n>\n"
       "  --temperature <float>\n"
       "  --top-k <int>\n"
       "  --top-p <float>\n"
@@ -43,6 +44,7 @@ struct CmdOptions {
   std::string prompt;
   std::string prompt_ids_csv;
   std::int32_t max_new_tokens = 1;
+  std::size_t max_seq = 0;
   float temperature = 0.0f;
   std::int32_t top_k = 0;
   float top_p = 0.0f;
@@ -80,6 +82,8 @@ CmdOptions parse_cmd_options(int argc, char** argv, int start_arg) {
       opts.prompt_ids_csv = require_value("--prompt-ids");
     } else if (key == "--max-new-tokens") {
       opts.max_new_tokens = static_cast<std::int32_t>(std::stol(require_value("--max-new-tokens")));
+    } else if (key == "--max-seq") {
+      opts.max_seq = static_cast<std::size_t>(std::stoull(require_value("--max-seq")));
     } else if (key == "--temperature") {
       opts.temperature = std::stof(require_value("--temperature"));
     } else if (key == "--top-k") {
@@ -108,6 +112,30 @@ std::vector<std::int32_t> resolve_prompt_ids(const CmdOptions& opts, const std::
   }
   *tokenizer = ds::rt::Tokenizer::load_from_file(tok_json);
   return tokenizer->encode(opts.prompt);
+}
+
+std::size_t resolve_max_seq(const CmdOptions& opts, std::size_t limit, std::size_t prompt_len, bool is_generate) {
+  std::size_t required = prompt_len;
+  if (is_generate && opts.max_new_tokens > 0) {
+    required += static_cast<std::size_t>(opts.max_new_tokens);
+  }
+  if (required == 0) required = 1;
+
+  if (required > limit) {
+    throw std::runtime_error("requested sequence exceeds model max_position_embeddings");
+  }
+
+  if (opts.max_seq != 0) {
+    if (opts.max_seq < required) {
+      throw std::runtime_error("--max-seq is smaller than the requested prompt/generation length");
+    }
+    if (opts.max_seq > limit) {
+      throw std::runtime_error("--max-seq exceeds model max_position_embeddings");
+    }
+    return opts.max_seq;
+  }
+
+  return required;
 }
 
 } // namespace
@@ -186,7 +214,10 @@ int main(int argc, char** argv) {
       auto runtime_model = ds::rt::load_model(model_dir);
       ds::rt::ModelExecutor executor(runtime_model, ds::rt::RunConfig{
                                                         .backend = ds::rt::parse_backend_kind(opts.backend),
-                                                        .max_seq = static_cast<std::size_t>(runtime_model->info().max_position_embeddings),
+                                                        .max_seq = resolve_max_seq(
+                                                            opts,
+                                                            static_cast<std::size_t>(runtime_model->info().max_position_embeddings),
+                                                            prompt_ids.size(), cmd == "generate"),
                                                         .verbose = false,
                                                     });
       if (has_tokenizer && tokenizer.empty()) tokenizer = ds::rt::Tokenizer::load_from_file(tok_json);

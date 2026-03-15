@@ -57,6 +57,27 @@ struct CachedWeight {
   CachedWeightKind kind = CachedWeightKind::DecodedF32;
 };
 
+struct CachedWeightKey {
+  const void* data = nullptr;
+  std::size_t nbytes = 0;
+  ds::hf::DType dtype = ds::hf::DType::F32;
+  std::string name;
+
+  bool operator==(const CachedWeightKey& other) const {
+    return data == other.data && nbytes == other.nbytes && dtype == other.dtype && name == other.name;
+  }
+};
+
+struct CachedWeightKeyHash {
+  std::size_t operator()(const CachedWeightKey& key) const {
+    std::size_t h = std::hash<const void*>{}(key.data);
+    h ^= std::hash<std::size_t>{}(key.nbytes) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    h ^= std::hash<int>{}(static_cast<int>(key.dtype)) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    h ^= std::hash<std::string>{}(key.name) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    return h;
+  }
+};
+
 struct CudaMLACache {
   std::size_t max_seq = 0;
   std::size_t n_heads = 0;
@@ -379,7 +400,12 @@ class CudaContext {
   }
 
   const CachedWeight* cache_weight(const ds::hf::TensorSlice& weight) {
-    const void* key = weight.data;
+    const CachedWeightKey key{
+        .data = weight.data,
+        .nbytes = weight.nbytes,
+        .dtype = weight.dtype,
+        .name = weight.name,
+    };
     auto it = weight_cache_.find(key);
     if (it != weight_cache_.end()) {
       ++g_stats.cached_weight_hits;
@@ -533,7 +559,7 @@ class CudaContext {
   DeviceBuffer scratch_w_;
   DeviceBuffer scratch_weight_;
   DeviceBuffer scratch_x_;
-  std::unordered_map<const void*, CachedWeight> weight_cache_;
+    std::unordered_map<CachedWeightKey, CachedWeight, CachedWeightKeyHash> weight_cache_;
 };
 
 CudaContext& context() {

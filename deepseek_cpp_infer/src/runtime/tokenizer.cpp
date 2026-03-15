@@ -130,6 +130,15 @@ std::vector<std::int32_t> Tokenizer::encode(const std::string& text) const {
     }
 
     if (best_id < 0) {
+      if (std::isspace(static_cast<unsigned char>(text[pos]))) {
+        // If the vocabulary does not encode the whitespace span directly,
+        // skip it and let the next word match Ġ/▁-prefixed variants.
+        do {
+          ++pos;
+        } while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])));
+        continue;
+      }
+
       std::int32_t candidate = -1;
       if (!lookup_piece_with_variants(text.substr(pos, 1), at_word_start, &candidate)) {
         throw std::runtime_error("tokenizer could not encode input near byte offset " + std::to_string(pos));
