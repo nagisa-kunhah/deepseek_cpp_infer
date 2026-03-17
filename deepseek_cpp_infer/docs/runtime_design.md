@@ -49,10 +49,10 @@ stable while CUDA kernels are introduced incrementally.
 - exposes `encode(text)` and `decode(ids)`
 - keeps tokenizer metadata such as BOS/EOS IDs when present
 
-The current tokenizer implementation is intentionally small. It supports loading
-HF token vocabularies and a greedy text-to-token fallback suitable for smoke
-tests and simple prompts. It is not yet a full replacement for the Hugging Face
-tokenizers runtime.
+The default runtime tokenizer is now backed by `tokenizers-cpp`, which wraps
+the Hugging Face tokenizers runtime behind a C++ interface. The project keeps a
+separate minimal tokenizer implementation only for tests, mock fixtures, and
+smoke paths that intentionally avoid the external dependency surface.
 
 ### WeightRegistry
 

@@ -9,6 +9,10 @@ cmake -S . -B build
 cmake --build build -j
 ```
 
+This project now depends on the Rust toolchain to build the external tokenizer
+runtime (`vendor/tokenizers-cpp`). Install `rustup`, `rustc`, and `cargo`
+before configuring CMake.
+
 ## CLI
 
 - `ds_chat <model_dir> info`
@@ -31,7 +35,8 @@ cmake --build build -j
 - Provides a CPU reference executor for single-session incremental decode.
 - Supports DeepSeek-V2-Lite style attention cache layout and token-local MoE routing.
 - Exposes `run` and `generate` commands.
-- Includes a lightweight tokenizer loader and smoke-test coverage for runtime wiring.
+- Uses `tokenizers-cpp` for the default Hugging Face `tokenizer.json` runtime and
+  keeps a minimal tokenizer implementation only for tests and smoke fixtures.
 
 ## Runtime Notes
 
@@ -42,8 +47,11 @@ cmake --build build -j
   - offloads `RMSNorm`, linear/GEMV, RoPE, MLA score/softmax/value accumulation, and token-local MoE routing
   - uses cached full-weight uploads for small/medium tensors and row-chunk streaming GEMV for large tensors
   - exposes internal CUDA hit/fallback stats for regression tests
-- `--prompt` works through a minimal tokenizer implementation. For exact/reliable smoke
-  runs, prefer `--prompt-ids`.
+- `--prompt` now uses an external tokenizer runtime via `tokenizers-cpp`, which
+  is substantially closer to real Hugging Face behavior than the old minimal
+  in-tree implementation.
+- `--prompt-ids` remains the zero-ambiguity fallback when you want to bypass
+  tokenizer behavior entirely.
 - Current RoPE path uses the base theta path and does not yet implement the full
   DeepSeek-V2 scaling variants.
 
