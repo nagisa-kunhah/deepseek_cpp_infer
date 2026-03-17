@@ -213,7 +213,7 @@ void assert_close(const std::vector<float>& a, const std::vector<float>& b, floa
   }
 }
 
-void test_tokenizer() {
+void test_minimal_tokenizer() {
   const std::string path = "/tmp/ds_runtime_tokenizer_test.json";
   std::ofstream f(path);
   f << R"({
@@ -228,7 +228,7 @@ void test_tokenizer() {
   })";
   f.close();
 
-  const auto tok = ds::rt::Tokenizer::load_from_file(path);
+  const auto tok = ds::rt::Tokenizer::load_minimal_from_file(path);
   const auto ids = tok.encode("hello world!");
   assert(ids.size() == 3);
   assert(ids[0] == 0);
@@ -236,7 +236,7 @@ void test_tokenizer() {
   assert(ids[2] == 2);
 }
 
-void test_tokenizer_word_start_variants_after_spaces() {
+void test_minimal_tokenizer_word_start_variants_after_spaces() {
   const std::string path = "/tmp/ds_runtime_tokenizer_word_start_test.json";
   std::ofstream f(path);
   f << R"({
@@ -250,11 +250,53 @@ void test_tokenizer_word_start_variants_after_spaces() {
   })";
   f.close();
 
-  const auto tok = ds::rt::Tokenizer::load_from_file(path);
+  const auto tok = ds::rt::Tokenizer::load_minimal_from_file(path);
   const auto ids = tok.encode("good morning");
   assert(ids.size() == 2);
   assert(ids[0] == 0);
   assert(ids[1] == 1);
+}
+
+void test_external_tokenizer() {
+  const std::string path = "/tmp/ds_runtime_external_tokenizer_test.json";
+  std::ofstream f(path);
+  f << R"({
+    "version": "1.0",
+    "truncation": null,
+    "padding": null,
+    "added_tokens": [],
+    "normalizer": null,
+    "pre_tokenizer": {"type": "Whitespace"},
+    "post_processor": null,
+    "decoder": {"type": "WordPiece", "prefix": "##", "cleanup": false},
+    "model": {
+      "type": "WordPiece",
+      "unk_token": "<unk>",
+      "continuing_subword_prefix": "##",
+      "max_input_chars_per_word": 100,
+      "vocab": {
+        "hello": 0,
+        "world": 1,
+        "!": 2,
+        "<eos>": 3,
+        "<bos>": 4,
+        "<unk>": 5
+      }
+    },
+    "bos_token_id": 4,
+    "eos_token_id": 3
+  })";
+  f.close();
+
+  const auto tok = ds::rt::Tokenizer::load_from_file(path);
+  const auto ids = tok.encode("hello");
+  assert(ids.size() == 1);
+  assert(ids[0] == 0);
+  assert(tok.metadata().bos_token_id == 4);
+  assert(tok.metadata().eos_token_id == 3);
+  assert(tok.metadata().unk_token_id == 5);
+  assert(tok.decode({0}) == "hello");
+  assert(tok.decode({3}).empty());
 }
 
 void test_deepseek_weight_registry() {
@@ -400,8 +442,9 @@ int main() {
     std::ofstream f("/tmp/ds_runtime_model_package_config.json");
     f << R"({"model_type":"deepseek_v2","hidden_size":4,"num_hidden_layers":2,"vocab_size":8})";
   }
-  test_tokenizer();
-  test_tokenizer_word_start_variants_after_spaces();
+  test_minimal_tokenizer();
+  test_minimal_tokenizer_word_start_variants_after_spaces();
+  test_external_tokenizer();
   test_runtime_model_executor_is_generic();
   test_deepseek_weight_registry();
   test_mla_smoke();

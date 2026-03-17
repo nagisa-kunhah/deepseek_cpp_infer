@@ -6,6 +6,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
+find_program(DS_RUSTC_EXECUTABLE rustc HINTS "$ENV{HOME}/.cargo/bin")
+find_program(DS_CARGO_EXECUTABLE cargo HINTS "$ENV{HOME}/.cargo/bin")
+if(NOT DS_RUSTC_EXECUTABLE OR NOT DS_CARGO_EXECUTABLE)
+  message(FATAL_ERROR
+    "Rust toolchain is required to build the external tokenizer runtime. "
+    "Install rustup and ensure rustc/cargo are available (for example via $HOME/.cargo/bin).")
+endif()
+
 option(DS_USE_CUDA "Build with CUDA" ON)
 set(DS_CUDA_ARCHITECTURES "native" CACHE STRING "CUDA architectures for project CUDA targets")
 
@@ -35,6 +43,9 @@ if(DS_USE_CUDA)
     src/ops/cuda/routing_kernels.cu
   )
 endif()
+
+set(MLC_ENABLE_SENTENCEPIECE_TOKENIZER OFF CACHE BOOL "Disable unused sentencepiece tokenizer support" FORCE)
+add_subdirectory(vendor/tokenizers-cpp)
 
 add_executable(ds_chat
   src/main.cpp
@@ -86,6 +97,7 @@ if(DS_USE_CUDA)
 else()
   target_compile_definitions(ds_chat PRIVATE DS_USE_CUDA=0)
 endif()
+target_link_libraries(ds_chat PRIVATE tokenizers_cpp)
 
 enable_testing()
 
@@ -122,6 +134,7 @@ add_executable(ds_tests
 
 target_include_directories(ds_tests PRIVATE include)
 target_compile_definitions(ds_tests PRIVATE DS_USE_CUDA=0)
+target_link_libraries(ds_tests PRIVATE tokenizers_cpp)
 
 add_test(NAME ds_runtime_smoke COMMAND ds_tests)
 add_test(
@@ -169,7 +182,7 @@ if(DS_USE_CUDA)
     CUDA_STANDARD_REQUIRED ON
     CUDA_ARCHITECTURES "${DS_CUDA_ARCHITECTURES}"
   )
-  target_link_libraries(ds_cuda_tests PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::cublas CUDA::cublasLt)
+  target_link_libraries(ds_cuda_tests PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::cublas CUDA::cublasLt tokenizers_cpp)
   add_test(NAME ds_cuda_runtime_smoke COMMAND ds_cuda_tests)
   add_test(
     NAME ds_cli_cuda_e2e

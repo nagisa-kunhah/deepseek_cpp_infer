@@ -9,6 +9,35 @@ cmake -S . -B build
 cmake --build build -j
 ```
 
+This project now depends on the Rust toolchain to build the external tokenizer
+runtime (`vendor/tokenizers-cpp`). Install `rustup`, `rustc`, and `cargo`
+before configuring CMake.
+
+Rust is only required at build time. Once `ds_chat` is built, the runtime does
+not need a separate Rust installation on the target machine.
+
+For a fresh Ubuntu remote machine, you can install the toolchain with:
+
+```bash
+sudo tools/install_deps_ubuntu.sh
+source "$HOME/.cargo/env"
+```
+
+Then use the helper below to initialize submodules, build the project, and run
+the CLI in one step:
+
+```bash
+tools/bootstrap_run.sh /path/to/model verify
+tools/bootstrap_run.sh /path/to/model run --prompt "hello"
+tools/bootstrap_run.sh --mock generate --prompt "hello world" --max-new-tokens 3
+```
+
+If the machine already has a built `ds_chat`, you can skip the build step:
+
+```bash
+tools/bootstrap_run.sh --skip-build /path/to/model generate --prompt "hello" --max-new-tokens 8
+```
+
 ## CLI
 
 - `ds_chat <model_dir> info`
@@ -31,7 +60,8 @@ cmake --build build -j
 - Provides a CPU reference executor for single-session incremental decode.
 - Supports DeepSeek-V2-Lite style attention cache layout and token-local MoE routing.
 - Exposes `run` and `generate` commands.
-- Includes a lightweight tokenizer loader and smoke-test coverage for runtime wiring.
+- Uses `tokenizers-cpp` for the default Hugging Face `tokenizer.json` runtime and
+  keeps a minimal tokenizer implementation only for tests and smoke fixtures.
 
 ## Runtime Notes
 
@@ -42,8 +72,11 @@ cmake --build build -j
   - offloads `RMSNorm`, linear/GEMV, RoPE, MLA score/softmax/value accumulation, and token-local MoE routing
   - uses cached full-weight uploads for small/medium tensors and row-chunk streaming GEMV for large tensors
   - exposes internal CUDA hit/fallback stats for regression tests
-- `--prompt` works through a minimal tokenizer implementation. For exact/reliable smoke
-  runs, prefer `--prompt-ids`.
+- `--prompt` now uses an external tokenizer runtime via `tokenizers-cpp`, which
+  is substantially closer to real Hugging Face behavior than the old minimal
+  in-tree implementation.
+- `--prompt-ids` remains the zero-ambiguity fallback when you want to bypass
+  tokenizer behavior entirely.
 - Current RoPE path uses the base theta path and does not yet implement the full
   DeepSeek-V2 scaling variants.
 
@@ -72,6 +105,7 @@ same mock flow with `--backend cuda`.
 Architecture and implementation notes:
 
 - `ARCHITECTURE.md`
+- `docs/remote_startup.md`
 - `docs/deepseek_v2_lite_architecture.md`
 - `docs/runtime_design.md`
 - `docs/implementation_plan.md`
