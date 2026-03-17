@@ -13,6 +13,18 @@ This project now depends on the Rust toolchain to build the external tokenizer
 runtime (`vendor/tokenizers-cpp`). Install `rustup`, `rustc`, and `cargo`
 before configuring CMake.
 
+Rust is only required at build time. Once `ds_chat` is built, the runtime does
+not need a separate Rust installation on the target machine.
+
+For a fresh remote machine, you can use the helper below to initialize
+submodules, build the project, and run the CLI in one step:
+
+```bash
+tools/bootstrap_run.sh /path/to/model verify
+tools/bootstrap_run.sh /path/to/model run --prompt "hello"
+tools/bootstrap_run.sh --mock generate --prompt "hello world" --max-new-tokens 3
+```
+
 ## CLI
 
 - `ds_chat <model_dir> info`
