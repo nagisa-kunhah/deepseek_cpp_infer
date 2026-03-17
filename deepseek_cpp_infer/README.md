@@ -16,13 +16,26 @@ before configuring CMake.
 Rust is only required at build time. Once `ds_chat` is built, the runtime does
 not need a separate Rust installation on the target machine.
 
-For a fresh remote machine, you can use the helper below to initialize
-submodules, build the project, and run the CLI in one step:
+For a fresh Ubuntu remote machine, you can install the toolchain with:
+
+```bash
+sudo tools/install_deps_ubuntu.sh
+source "$HOME/.cargo/env"
+```
+
+Then use the helper below to initialize submodules, build the project, and run
+the CLI in one step:
 
 ```bash
 tools/bootstrap_run.sh /path/to/model verify
 tools/bootstrap_run.sh /path/to/model run --prompt "hello"
 tools/bootstrap_run.sh --mock generate --prompt "hello world" --max-new-tokens 3
+```
+
+If the machine already has a built `ds_chat`, you can skip the build step:
+
+```bash
+tools/bootstrap_run.sh --skip-build /path/to/model generate --prompt "hello" --max-new-tokens 8
 ```
 
 ## CLI
@@ -92,6 +105,7 @@ same mock flow with `--backend cuda`.
 Architecture and implementation notes:
 
 - `ARCHITECTURE.md`
+- `docs/remote_startup.md`
 - `docs/deepseek_v2_lite_architecture.md`
 - `docs/runtime_design.md`
 - `docs/implementation_plan.md`

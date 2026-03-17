@@ -8,12 +8,15 @@ BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build}"
 usage() {
   cat <<'EOF'
 usage:
+  tools/bootstrap_run.sh [--build-dir <dir>] [--skip-build] <model_dir> [ds_chat args...]
+  tools/bootstrap_run.sh [--build-dir <dir>] [--skip-build] --mock [ds_chat args...]
   tools/bootstrap_run.sh <model_dir> [ds_chat args...]
   tools/bootstrap_run.sh --mock [ds_chat args...]
 
 examples:
   tools/bootstrap_run.sh /models/deepseek verify
   tools/bootstrap_run.sh /models/deepseek run --prompt "hello"
+  tools/bootstrap_run.sh --skip-build /models/deepseek generate --prompt "hello" --max-new-tokens 8
   tools/bootstrap_run.sh --mock generate --prompt "hello world" --max-new-tokens 3
 
 notes:
@@ -50,6 +53,32 @@ build_project() {
 }
 
 main() {
+  local skip_build=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --build-dir)
+        if [[ $# -lt 2 ]]; then
+          echo "error: --build-dir requires a value" >&2
+          exit 1
+        fi
+        BUILD_DIR="$2"
+        shift 2
+        ;;
+      --skip-build)
+        skip_build=1
+        shift
+        ;;
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
   if [[ $# -lt 1 ]]; then
     usage
     exit 1
@@ -71,7 +100,12 @@ main() {
     fi
   fi
 
-  build_project
+  if [[ "${skip_build}" -eq 0 ]]; then
+    build_project
+  elif [[ ! -x "${BUILD_DIR}/ds_chat" ]]; then
+    echo "error: --skip-build was set but ${BUILD_DIR}/ds_chat does not exist" >&2
+    exit 1
+  fi
 
   exec "${BUILD_DIR}/ds_chat" "${model_dir}" "$@"
 }
